@@ -17,6 +17,11 @@ from models.ptcycle_model import (
 from models.stage_model import Stage
 from models.status_model import Status
 from models.tbxpertultraresult_model import TBXpertUltraResultDB
+from models.tbxpertxdrresult_model import TBXpertXDRResultDB
+from models.hivvlresult_model import HIVVLResultDB
+from models.hiveidresult_model import HIVEIDResultDB
+from models.evaluation_model import ParamEvaluateCycle, EvaluateCycleResult
+from helpers import evaluation
 from models.user_model import User, UserDB
 from models.review_model import Review
 from helpers import assist
@@ -25,9 +30,25 @@ from sqlalchemy.orm import selectinload
 from models.scheme_model import SchemeDB
 from models.ptcyclestatus_model import PTCycleStatusDB
 from models.applications_model import ApplicationsDB
+from models.method_model import (
+    MethodDB,
+    RESULT_FORM_TB_XPERT_ULTRA,
+    RESULT_FORM_TB_XPERT_XDR,
+    RESULT_FORM_HIV_VL,
+    RESULT_FORM_HIV_EID,
+)
 from models.enrollment_model import EnrollmentDB
 
 router = APIRouter(prefix="/pt-cycles", tags=["PTCycles"])
+
+# which result sheet a method's participants fill in. A method whose form is
+# not listed here ships no sheets, rather than being given the wrong form.
+RESULT_MODEL_BY_FORM = {
+    RESULT_FORM_TB_XPERT_ULTRA: TBXpertUltraResultDB,
+    RESULT_FORM_TB_XPERT_XDR: TBXpertXDRResultDB,
+    RESULT_FORM_HIV_VL: HIVVLResultDB,
+    RESULT_FORM_HIV_EID: HIVEIDResultDB,
+}
 
 
 @router.post("/create", response_model=PTCycle)
@@ -194,9 +215,16 @@ async def change_ptcycle_status(
 
     enrollment_count = 0
     result_count = 0
+    evaluated = None
 
     if next_status == assist.PT_CYCLE_SAMPLES_SHIPPED:
         enrollment_count, result_count = await _ship_samples(db, ptcycle, user)
+
+    if next_status == assist.PT_CYCLE_REPORT_AVAILABLE:
+        # score the round and freeze what it concluded; a report issued now
+        # must still say the same thing if it is re-run next year
+        if not await evaluation.cycle_is_evaluated(db, ptcycle):
+            evaluated = await evaluation.evaluate_cycle(db, ptcycle, user)
 
     ptcycle.pt_cyle_status_id = next_status
     ptcycle.updated_by = user.email
@@ -213,6 +241,12 @@ async def change_ptcycle_status(
         message += (
             f". {result_count} result sheet(s) were opened across "
             f"{enrollment_count} enrolment(s)"
+        )
+    if evaluated:
+        stats, evals, performances = evaluated
+        message += (
+            f". {evals} result(s) were scored against {stats} sample "
+            f"statistic(s), giving {performances} participant report(s)"
         )
 
     return PTCycleStatusChangeResult(
@@ -299,6 +333,10 @@ async def _get_admin_user(db: AsyncSession, user_id: int) -> UserDB:
 async def _ship_samples(db: AsyncSession, ptcycle: PTCycleDB, user: UserDB):
     """Opens a result sheet for every sample of every accepted enrolment.
 
+    Which sheet depends on the method: each method declares the result form its
+    participants fill in, and a method whose form has not been built yet is
+    skipped rather than being given the wrong one.
+
     Re-running this is safe: a sheet that already exists is left alone, so an
     enrolment accepted late still picks up its samples on the next attempt.
     """
@@ -321,6 +359,28 @@ async def _ship_samples(db: AsyncSession, ptcycle: PTCycleDB, user: UserDB):
             ),
         )
 
+    # the form each enrolled method is captured on
+    result = await db.execute(
+        select(MethodDB.id, MethodDB.result_form).where(
+            MethodDB.id.in_({e.method_id for e in enrollments})
+        )
+    )
+    form_by_method = {id: form for id, form in result.all()}
+
+    enrollments = [
+        e for e in enrollments
+        if form_by_method.get(e.method_id) in RESULT_MODEL_BY_FORM
+    ]
+
+    if not enrollments:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "None of the accepted enrolments for this PT Cycle use a method "
+                "with a result form, so no result sheets can be opened."
+            ),
+        )
+
     # the samples that make up the panel for each enrolled method
     method_ids = {enrollment.method_id for enrollment in enrollments}
     result = await db.execute(
@@ -336,16 +396,19 @@ async def _ship_samples(db: AsyncSession, ptcycle: PTCycleDB, user: UserDB):
         samples_by_method.setdefault(sample.method_id, []).append(sample)
 
     # what has already been opened, so a repeat run does not duplicate
-    result = await db.execute(
-        select(
-            TBXpertUltraResultDB.lab_id, TBXpertUltraResultDB.method_sample_id
-        ).where(TBXpertUltraResultDB.pt_cycle_id == ptcycle.id)
-    )
-    existing = {(lab_id, sample_id) for lab_id, sample_id in result.all()}
+    existing = {}
+    for form, model in RESULT_MODEL_BY_FORM.items():
+        result = await db.execute(
+            select(model.lab_id, model.method_sample_id)
+            .where(model.pt_cycle_id == ptcycle.id)
+        )
+        existing[form] = {(lab_id, sample_id) for lab_id, sample_id in result.all()}
 
     result_count = 0
 
     for enrollment in enrollments:
+        form = form_by_method[enrollment.method_id]
+        model = RESULT_MODEL_BY_FORM[form]
         samples = samples_by_method.get(enrollment.method_id, [])
 
         if not samples:
@@ -359,11 +422,11 @@ async def _ship_samples(db: AsyncSession, ptcycle: PTCycleDB, user: UserDB):
             )
 
         for sample in samples:
-            if (enrollment.lab_id, sample.id) in existing:
+            if (enrollment.lab_id, sample.id) in existing[form]:
                 continue
 
             db.add(
-                TBXpertUltraResultDB(
+                model(
                     name=f"{sample.name} - {enrollment.laboratory.name}",
                     description=(
                         f"{ptcycle.name} panel sample {sample.name} for "
@@ -386,7 +449,7 @@ async def _ship_samples(db: AsyncSession, ptcycle: PTCycleDB, user: UserDB):
                     created_by=user.email,
                 )
             )
-            existing.add((enrollment.lab_id, sample.id))
+            existing[form].add((enrollment.lab_id, sample.id))
             result_count += 1
 
     return len(enrollments), result_count
@@ -575,3 +638,71 @@ async def review_posting(
     return ptcycle
 
 
+
+
+@router.put("/evaluate/{id}", response_model=EvaluateCycleResult)
+async def evaluate_ptcycle(
+    id: int, request: ParamEvaluateCycle, db: AsyncSession = Depends(get_db)
+):
+    """Scores a round and freezes what it concluded.
+
+    This normally runs by itself when the cycle moves to 'Report Available'.
+    It is exposed separately so a round can be re-scored after a correction -
+    which rewrites reports that have already been issued, so it has to be
+    asked for explicitly.
+    """
+    result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
+    ptcycle = result.scalar_one_or_none()
+
+    if not ptcycle:
+        raise HTTPException(
+            status_code=404, detail=f"Unable to find PT Cycle with id '{id}'"
+        )
+
+    user = await _get_admin_user(db, request.user_id)
+
+    if ptcycle.pt_cyle_status_id < assist.PT_CYCLE_SAMPLES_SHIPPED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The samples for this PT Cycle have not been shipped yet, so "
+                "there is nothing to score"
+            ),
+        )
+
+    already = await evaluation.cycle_is_evaluated(db, ptcycle)
+
+    if already and not request.recompute:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This PT Cycle has already been scored. Re-scoring changes "
+                "reports that have already been issued, so send recompute=true "
+                "if that is what you intend."
+            ),
+        )
+
+    if already:
+        await evaluation.clear_cycle_evaluation(db, ptcycle)
+
+    stats, evals, performances = await evaluation.evaluate_cycle(db, ptcycle, user)
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400, detail=f"Unable to score the PT Cycle: {e}"
+        )
+
+    return EvaluateCycleResult(
+        succeeded=True,
+        message=(
+            f"{evals} result(s) were scored against {stats} sample statistic(s), "
+            f"giving {performances} participant report(s)"
+        ),
+        pt_cycle_id=ptcycle.id,
+        sample_statistics=stats,
+        result_evaluations=evals,
+        enrollment_performances=performances,
+    )

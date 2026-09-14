@@ -61,6 +61,9 @@ class ServiceDB(Base):
 
     #links
     tbxpertultraresult = relationship("TBXpertUltraResultDB", back_populates="service", lazy='raise')
+    tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="service", lazy='raise')
+    hivvlresult = relationship("HIVVLResultDB", back_populates="service", lazy='raise')
+    hiveidresult = relationship("HIVEIDResultDB", back_populates="service", lazy='raise')
     enrollment = relationship("EnrollmentDB", back_populates="service", lazy='raise')
     method = relationship("MethodDB", back_populates="service", lazy='raise')
     methodsample = relationship("MethodSampleDB", back_populates="service", lazy='raise')

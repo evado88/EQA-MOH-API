@@ -75,6 +75,132 @@ PT_CYCLE_ENROLLMENT_OPEN = (PT_CYCLE_STARTED,)
 PT_CYCLE_RESULT_CAPTURE_OPEN = (PT_CYCLE_SAMPLES_SHIPPED,)
 
 
+# ---------------------------------------------------------------- evaluation
+# How a reported result is turned into a score and a grade.
+
+# a sample is graded either against a number (a viral load) or against a
+# category (TB detected / not detected)
+EVALUATION_QUANTITATIVE = "quantitative"
+EVALUATION_QUALITATIVE = "qualitative"
+
+# where the value a result is graded against comes from
+ASSIGNED_VALUE_PREDEFINED = "predefined"   # the panel manufacturer states it
+ASSIGNED_VALUE_CONSENSUS = "consensus"     # derived from the participants
+
+GRADE_ACCEPTABLE = "Acceptable"
+GRADE_WARNING = "Warning"
+GRADE_UNACCEPTABLE = "Unacceptable"
+GRADE_NOT_EVALUATED = "Not Evaluated"
+
+# z-score bands, from form TF-007:
+#   z <= +/-2.0          Acceptable     no action required
+#   +/-2.0 < z < +/-3.0  Warning        closely monitor performance
+#   z >= +/-3.0          Unacceptable   perform corrective action
+Z_SCORE_ACCEPTABLE = 2.0
+Z_SCORE_WARNING = 3.0
+
+PERFORMANCE_SATISFACTORY = "Satisfactory"
+PERFORMANCE_UNSATISFACTORY = "Unsatisfactory"
+PERFORMANCE_NOT_EVALUATED = "Not Evaluated"
+
+
+class ScoringPolicy:
+    """How one scheme turns a grade into marks, and marks into a standing.
+
+    Schemes do not agree on this. The EID scheme awards 20 marks a sample and
+    demands all of them; the others are scored out of 2 with a lower bar. So
+    the policy belongs to the form, not to the system.
+    """
+
+    def __init__(self, acceptable, warning, unacceptable, threshold, source):
+        self.acceptable = acceptable
+        self.warning = warning
+        self.unacceptable = unacceptable
+        self.max_per_attribute = max(acceptable, warning, unacceptable)
+        # the proportion of the available marks a lab must reach
+        self.threshold = threshold
+        # where these numbers come from, so they can be checked
+        self.source = source
+
+    def score_for(self, grade):
+        if grade == GRADE_ACCEPTABLE:
+            return self.acceptable
+        if grade == GRADE_WARNING:
+            return self.warning
+        return self.unacceptable
+
+
+# ASSUMPTION: the weights and threshold for the TB and viral load schemes are
+# not stated on their forms - confirm against scheme protocol LMUTHL-ID-002.
+DEFAULT_SCORING_POLICY = ScoringPolicy(
+    acceptable=2, warning=1, unacceptable=0, threshold=0.80,
+    source="assumed - confirm against LMUTHL-ID-002",
+)
+
+# Stated on form TF-006: a correct result scores 20, anything else scores 0,
+# and only a full 100 marks is satisfactory.
+EID_SCORING_POLICY = ScoringPolicy(
+    acceptable=20, warning=0, unacceptable=0, threshold=1.00,
+    source="TF-006 performance criteria",
+)
+
+# keyed by the result form; anything not listed uses the default
+SCORING_POLICIES = {
+    "hiv_eid": EID_SCORING_POLICY,
+}
+
+
+def scoring_policy(result_form):
+    return SCORING_POLICIES.get(result_form, DEFAULT_SCORING_POLICY)
+
+
+# kept for callers that predate the per-scheme policies
+SCORE_ACCEPTABLE = DEFAULT_SCORING_POLICY.acceptable
+SCORE_WARNING = DEFAULT_SCORING_POLICY.warning
+SCORE_UNACCEPTABLE = DEFAULT_SCORING_POLICY.unacceptable
+SCORE_MAX_PER_ATTRIBUTE = DEFAULT_SCORING_POLICY.max_per_attribute
+PERFORMANCE_SATISFACTORY_THRESHOLD = DEFAULT_SCORING_POLICY.threshold
+
+# ISO 13528 derives a robust standard deviation from the interquartile range
+NIQR_FACTOR = 0.7413
+
+# consensus needs enough participants to be meaningful; below this the sample
+# is reported but not graded
+MIN_PARTICIPANTS_FOR_CONSENSUS = 3
+
+
+def grade_for_z_score(z_score, policy=None):
+    """Turns a z-score into the grade and marks on form TF-007"""
+    policy = policy or DEFAULT_SCORING_POLICY
+
+    if z_score is None:
+        return GRADE_NOT_EVALUATED, policy.unacceptable
+
+    magnitude = abs(z_score)
+
+    if magnitude <= Z_SCORE_ACCEPTABLE:
+        grade = GRADE_ACCEPTABLE
+    elif magnitude < Z_SCORE_WARNING:
+        grade = GRADE_WARNING
+    else:
+        grade = GRADE_UNACCEPTABLE
+
+    return grade, policy.score_for(grade)
+
+
+def grade_for_agreement(reported, assigned, policy=None):
+    """Grades a categorical result by whether it matches the assigned value"""
+    policy = policy or DEFAULT_SCORING_POLICY
+
+    if reported is None or assigned is None:
+        return GRADE_NOT_EVALUATED, policy.unacceptable
+
+    if reported.strip().upper() == assigned.strip().upper():
+        return GRADE_ACCEPTABLE, policy.acceptable
+
+    return GRADE_UNACCEPTABLE, policy.unacceptable
+
+
 def is_laboratory_role(role_id: int) -> bool:
     """Returns true when the specified role belongs to a participating laboratory"""
     return role_id in LABORATORY_ROLES

@@ -22,6 +22,11 @@ from routes import service_routes
 from routes import method_routes
 from routes import methodsample_routes
 from routes import tbxpertultraresult_routes
+from routes import tbxpertxdrresult_routes
+from routes import hivvlresult_routes
+from routes import hiveidresult_routes
+from routes import evaluation_routes
+from routes import report_routes
 from routes import enrollment_routes
 from routes import applications_routes
 from routes import role_routes
@@ -72,6 +77,11 @@ app.include_router(service_routes.router)
 app.include_router(method_routes.router)
 app.include_router(methodsample_routes.router)
 app.include_router(tbxpertultraresult_routes.router)
+app.include_router(tbxpertxdrresult_routes.router)
+app.include_router(hivvlresult_routes.router)
+app.include_router(hiveidresult_routes.router)
+app.include_router(evaluation_routes.router)
+app.include_router(report_routes.router)
 app.include_router(enrollment_routes.router)
 app.include_router(applications_routes.router)
 app.include_router(role_routes.router)

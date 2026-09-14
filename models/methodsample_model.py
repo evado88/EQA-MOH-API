@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, Integer, String, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Boolean, Column, Float, Integer, String, Date, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel,  Field
 from typing import Optional, Optional, Any, List
@@ -29,6 +29,13 @@ class MethodSampleDB(Base):
     scheme_id = Column(Integer, ForeignKey("schemes.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     method_id = Column(Integer, ForeignKey("methods.id"), nullable=False)
+    # where a correct answer comes from. A manufactured panel states its own
+    # value, held per attribute in method_sample_expected_values; a consensus
+    # panel leaves it unstated and the value is derived from the participants.
+    assigned_value_source = Column(String, nullable=True)
+    # a kit control is shipped and recorded on the form, but is not scored -
+    # form TF-006 leaves the controls out of the evaluation table
+    is_control = Column(Boolean, nullable=False, default=False)
     # approval
     # user
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -67,6 +74,9 @@ class MethodSampleDB(Base):
 
     #links
     tbxpertultraresult = relationship("TBXpertUltraResultDB", back_populates="methodsample", lazy='raise')
+    tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="methodsample", lazy='raise')
+    hivvlresult = relationship("HIVVLResultDB", back_populates="methodsample", lazy='raise')
+    hiveidresult = relationship("HIVEIDResultDB", back_populates="methodsample", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
 class MethodSample(BaseModel):
@@ -93,6 +103,14 @@ class MethodSample(BaseModel):
     method_id: int = Field(
         ...,
         description="Method must be provided",
+    )
+    assigned_value_source: Optional[str] = Field(
+        default=None,
+        description="Where the correct answer comes from: predefined or consensus",
+    )
+    is_control: Optional[bool] = Field(
+        default=False,
+        description="A kit control, recorded on the form but not scored",
     )
     # approval
     # user

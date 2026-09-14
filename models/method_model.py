@@ -11,6 +11,22 @@ from models.scheme_model import Scheme
 from models.service_model import Service
 
 
+# ---------- Result forms ----------
+# the result form a method is captured on; a method whose form has not been
+# built yet simply has none, and no result sheets are opened for it
+RESULT_FORM_TB_XPERT_ULTRA = "tb_xpert_ultra"
+RESULT_FORM_TB_XPERT_XDR = "tb_xpert_xdr"
+RESULT_FORM_HIV_VL = "hiv_vl"
+RESULT_FORM_HIV_EID = "hiv_eid"
+
+RESULT_FORMS = [
+    RESULT_FORM_TB_XPERT_ULTRA,
+    RESULT_FORM_TB_XPERT_XDR,
+    RESULT_FORM_HIV_VL,
+    RESULT_FORM_HIV_EID,
+]
+
+
 # ---------- SQLAlchemy Models ----------
 class MethodDB(Base):
     __tablename__ = "methods"
@@ -27,6 +43,9 @@ class MethodDB(Base):
     # properties
     scheme_id = Column(Integer, ForeignKey("schemes.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
+    # which result form a lab fills in for this method; a method with no form
+    # yet ships no result sheets
+    result_form = Column(String, nullable=True)
     # approval
     # user
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -66,6 +85,9 @@ class MethodDB(Base):
     enrollment = relationship("EnrollmentDB", back_populates="method", lazy='raise')
     methodsample = relationship("MethodSampleDB", back_populates="method", lazy='raise')
     tbxpertultraresult = relationship("TBXpertUltraResultDB", back_populates="method", lazy='raise')
+    tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="method", lazy='raise')
+    hivvlresult = relationship("HIVVLResultDB", back_populates="method", lazy='raise')
+    hiveidresult = relationship("HIVEIDResultDB", back_populates="method", lazy='raise')
     applications = relationship("ApplicationsDB", back_populates="method", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
@@ -89,6 +111,10 @@ class Method(BaseModel):
     service_id: int = Field(
         ...,
         description="Service must be provided",
+    )
+    result_form: Optional[str] = Field(
+        default=None,
+        description=f"The result form used by this method, one of {RESULT_FORMS}",
     )
     # approval
     # user

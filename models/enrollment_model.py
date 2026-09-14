@@ -80,6 +80,9 @@ class EnrollmentDB(Base):
 
     #links
     tbxpertultraresult = relationship("TBXpertUltraResultDB", back_populates="enrollment", lazy='raise')
+    tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="enrollment", lazy='raise')
+    hivvlresult = relationship("HIVVLResultDB", back_populates="enrollment", lazy='raise')
+    hiveidresult = relationship("HIVEIDResultDB", back_populates="enrollment", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
 class Enrollment(BaseModel):
