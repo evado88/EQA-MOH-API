@@ -30,6 +30,8 @@ from routes import report_routes
 from routes import enrollment_routes
 from routes import applications_routes
 from routes import role_routes
+from routes import import_routes
+from routes import dashboard_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -85,6 +87,8 @@ app.include_router(report_routes.router)
 app.include_router(enrollment_routes.router)
 app.include_router(applications_routes.router)
 app.include_router(role_routes.router)
+app.include_router(import_routes.router)
+app.include_router(dashboard_routes.router)
 
 
 # create tables at startup

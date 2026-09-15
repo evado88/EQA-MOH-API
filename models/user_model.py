@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, root_validator
 from typing import Optional, List
 from datetime import date, datetime
 from database import Base
+from helpers import assist
 from models.stage_model import Stage
 from models.status_model import Status
 
@@ -87,7 +88,20 @@ class UserDB(Base):
     hiveidresult = relationship("HIVEIDResultDB", back_populates="user")
     enrollment = relationship("EnrollmentDB", back_populates="user")
     applications = relationship("ApplicationsDB", back_populates="user")
-    role = relationship("RoleDB", back_populates="user")
+    # the roles this user created, following the same naming as laboratories /
+    # provinces / districts above: plural is what the user made, singular is
+    # what the user belongs to
+    roles = relationship(
+        "RoleDB", back_populates="user", foreign_keys="RoleDB.user_id"
+    )
+    # the role this user holds. role_id carries no foreign key of its own - the
+    # list is seeded in a fixed order that helpers/assist.py mirrors - so the
+    # join has to be spelled out
+    role = relationship(
+        "RoleDB",
+        primaryjoin="foreign(UserDB.role_id) == RoleDB.id",
+        viewonly=True,
+    )
 
 
 
@@ -185,6 +199,192 @@ class User(BaseModel):
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+# Spelled out here rather than imported from role_model, laboratory_model,
+# province_model and district_model, every one of which imports this module.
+# They are also deliberately narrow: a listing needs what a laboratory is
+# called, not its method list.
+class UserRole(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class UserLaboratory(BaseModel):
+    id: Optional[int] = None
+    code: Optional[str] = None
+    name: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class UserProvince(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class UserDistrict(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+    # carried so the form can narrow the districts to the chosen province
+    province_id: Optional[int] = None
+
+    class Config:
+        orm_mode = True
+
+
+class UserWithDetail(BaseModel):
+    """A user as a listing shows them: the role they hold and where they work.
+
+    Deliberately not built on `User`. That model carries the password, which a
+    listing has no business sending to a browser, and it makes fields required
+    that only matter when an account is being created.
+    """
+
+    # id
+    id: Optional[int] = None
+    code: Optional[str] = None
+    type: Optional[int] = None
+
+    # personal details
+    fname: Optional[str] = None
+    lname: Optional[str] = None
+    position: Optional[str] = None
+
+    # contact, address
+    email: Optional[str] = None
+    mobile_code: Optional[str] = None
+    mobile: Optional[str] = None
+    address_physical: Optional[str] = None
+    address_postal: Optional[str] = None
+
+    # account
+    role_id: Optional[int] = None
+    role: Optional[UserRole] = None
+
+    # where they work; provider staff belong to no laboratory
+    laboratory_id: Optional[int] = None
+    laboratory: Optional[UserLaboratory] = None
+
+    province_id: Optional[int] = None
+    district_id: Optional[int] = None
+
+    # approval
+    status_id: Optional[int] = None
+    stage_id: Optional[int] = None
+    status: Optional[Status] = None
+    stage: Optional[Stage] = None
+    approval_levels: Optional[int] = None
+
+    # service columns
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+class UserSave(BaseModel):
+    """What the add and edit form posts.
+
+    Separate from `User` because the two have different rules. `User` makes a
+    password mandatory, which is right when an account is being created and
+    wrong every other time - an admin correcting a phone number should not have
+    to retype, or reset, somebody's password.
+    """
+
+    # personal details
+    fname: str = Field(
+        ...,
+        min_length=2,
+        max_length=50,
+        description="First name must be between 2 and 50 characters",
+    )
+    lname: str = Field(
+        ...,
+        min_length=2,
+        max_length=50,
+        description="Last name must be between 2 and 50 characters",
+    )
+    position: Optional[str] = None
+    code: Optional[str] = None
+    type: Optional[int] = None
+
+    # contact, address
+    email: EmailStr
+    mobile_code: str = Field(..., min_length=2, max_length=5)
+    mobile: str = Field(..., min_length=3, max_length=15)
+    address_physical: Optional[str] = None
+    address_postal: Optional[str] = None
+
+    # account
+    role_id: int = Field(..., ge=1, le=100, description="Role must be provided")
+    # a laboratory role reports for one laboratory; provider staff for none
+    laboratory_id: Optional[int] = Field(default=None, ge=1)
+    province_id: Optional[int] = Field(default=None, ge=1)
+    district_id: Optional[int] = Field(default=None, ge=1)
+
+    # left unset on an edit, which leaves the existing password alone
+    password: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=255,
+        description="Password must be at least 8 characters",
+    )
+
+    # service
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    @root_validator
+    def check_laboratory_matches_role(cls, values):
+        """A laboratory account has to say which laboratory it belongs to.
+
+        The result and dashboard routes decide what an account may see from
+        `laboratory_id`, so a facility account without one can sign in and then
+        find nothing it is allowed to touch.
+        """
+        role_id = values.get("role_id")
+        laboratory_id = values.get("laboratory_id")
+
+        if role_id is None:
+            return values
+
+        if assist.is_laboratory_role(role_id):
+            if not laboratory_id:
+                raise ValueError(
+                    "A facility role must be linked to a laboratory"
+                )
+        elif laboratory_id:
+            raise ValueError(
+                "Only a facility role can be linked to a laboratory"
+            )
+
+        return values
+
+    class Config:
+        orm_mode = True
+
+
+class ParamUserEdit(BaseModel):
+    """The user being edited, and everything its form has to offer as a choice"""
+
+    user: Optional[UserWithDetail] = None
+    roleList: Optional[List[UserRole]] = []
+    laboratoryList: Optional[List[UserLaboratory]] = []
+    provinceList: Optional[List[UserProvince]] = []
+    districtList: Optional[List[UserDistrict]] = []
 
     class Config:
         orm_mode = True

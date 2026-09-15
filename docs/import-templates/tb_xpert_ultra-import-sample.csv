@@ -1,0 +1,4 @@
+scheme,service,method,sample,pt_cycle_code,lab_code,lab_email,captured_by,status,description,date_tested,result_interpretable,tb_detection_result,rif_result,uninterpretable_result,error_code,ultra_spc,is1081_is6110,rpob1,rpob2,rpob3,rpob4,xpert_module_number
+Tuberculosis (TB),TB Xpert,Ultra,ultra-CDL-2026-A-1,2026-A,REG0001,,,Approved,Migrated from the 2026-A register,2026-03-04,Yes,MEDIUM,NOT DETECTED,,,24.6,18.2,19.4,19.8,20.1,20.4,A1-0431
+Tuberculosis (TB),TB Xpert,Ultra,ultra-CDL-2026-A-2,2026-A,REG0001,,,Approved,,2026-03-04,Yes,NOT DETECTED,N/A,,,25.1,0,0,0,0,0,A1-0431
+Tuberculosis (TB),TB Xpert,Ultra,ultra-CDL-2026-A-3,2026-A,REG0001,,,Approved,Cartridge failed on the first run,2026-03-04,No,,,ERROR,5007,,,,,,,A1-0432

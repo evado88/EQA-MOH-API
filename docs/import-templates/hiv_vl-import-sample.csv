@@ -1,0 +1,4 @@
+scheme,service,method,sample,pt_cycle_code,lab_code,lab_email,captured_by,status,description,date_panel_received,date_tested,detection_assay,extraction_assay,assay_kit_lot_number,assay_kit_expiry_date,assay_serial_number,result_reported,viral_load_log10,not_tested_reason,tested_by,supervisor_name
+HIV-1 Viral Load- Conventional PCR,HIV-1 Viral Load,Abbott m2000,VL 2026-A1,VL-2026-A,REG0005,,,Approved,Migrated from the VL-2026-A register,2026-04-02,2026-04-08,Abbott RealTime HIV-1,Abbott m2000sp,LOT-44219,2026-11-30,M2000-77041,Yes,4.82,,M. Banda,C. Phiri
+HIV-1 Viral Load- Conventional PCR,HIV-1 Viral Load,Abbott m2000,VL 2026-A2,VL-2026-A,REG0005,,,Approved,,2026-04-02,2026-04-08,Abbott RealTime HIV-1,Abbott m2000sp,LOT-44219,2026-11-30,M2000-77041,Yes,0,,M. Banda,C. Phiri
+HIV-1 Viral Load- Conventional PCR,HIV-1 Viral Load,Abbott m2000,VL 2026-A3,VL-2026-A,REG0005,,,Approved,,2026-04-02,,,,,,,No,,"Vial arrived leaking, insufficient volume",M. Banda,C. Phiri

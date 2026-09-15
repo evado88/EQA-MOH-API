@@ -52,7 +52,9 @@ class RoleDB(Base):
     updated_by = Column(String, nullable=True)
     
     #relationships
-    user = relationship("UserDB", back_populates="role", lazy='raise')
+    user = relationship(
+        "UserDB", back_populates="roles", foreign_keys=[user_id], lazy='raise'
+    )
     status = relationship("StatusDB", back_populates="role", lazy='raise')
     stage = relationship("StageDB", back_populates="role", lazy='raise')
 

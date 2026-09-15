@@ -1,0 +1,4 @@
+code,name,description,contact_person_name,position,phone_number,email_address,lab_type,province,district,physical_address,methods,status
+REG0101,Mpika District Hospital Laboratory,Migrated from the 2025 participant register,Chanda Mulenga,Laboratory Manager,260977100101,lab.mpika@moh.gov.zm,Government,Muchinga,Mpika,"Great North Road, Mpika",Ultra|XDR,Pending
+REG0102,Kasama General Hospital Laboratory,,Bwalya Musonda,Senior Biomedical Scientist,260977100102,lab.kasama@moh.gov.zm,Government,Northern,Kasama,"Zambia Road, Kasama",Ultra,Pending
+,Choma Mission Hospital Laboratory,"No legacy code, so the server issues the next one",Naomi Sakala,Laboratory Scientist,260977100103,lab.choma@moh.gov.zm,Religious,Southern,Choma,"Livingstone Road, Choma",Abbott m2000|Cobas 4800,Pending

@@ -1,0 +1,4 @@
+scheme,service,method,sample,pt_cycle_code,lab_code,lab_email,captured_by,status,description,date_tested,result_interpretable,tb_detection_result,inh_result,flq_result,amk_result,eth_result,uninterpretable_result,error_code,spc_ahpc,inha,katg,fabg1,gyra1,gyra2,gyra3,gyrb2,rrs
+Tuberculosis (TB),TB Xpert,XDR,xdr-CDL-2026-A-1,2026-A,REG0002,,,Approved,Migrated from the 2026-A register,2026-03-06,Yes,DETECTED,DETECTED,NOT DETECTED,NOT DETECTED,NOT DETECTED,,,23.9,21.7,22.4,22.9,24.1,24.6,25.0,25.4,26.1
+Tuberculosis (TB),TB Xpert,XDR,xdr-CDL-2026-A-2,2026-A,REG0002,,,Approved,,2026-03-06,Yes,NOT DETECTED,N/A,N/A,N/A,N/A,,,24.2,0,0,0,0,0,0,0,0
+Tuberculosis (TB),TB Xpert,XDR,xdr-CDL-2026-A-3,2026-A,REG0002,,,Approved,The repeat run was also invalid,2026-03-06,No,,,,,,INVALID,,,,,,,,,,
