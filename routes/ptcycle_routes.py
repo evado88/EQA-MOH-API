@@ -53,8 +53,14 @@ RESULT_MODEL_BY_FORM = {
 
 @router.post("/create", response_model=PTCycle)
 async def post_ptcycle(ptcycle: PTCycle, db: AsyncSession = Depends(get_db)):
+    """Opens a PT Cycle.
 
-
+    The status is not the caller's to choose. Every cycle begins Upcoming and
+    moves forward one step at a time through /pt-cycles/status/{id} - each step
+    does something (enrolment opens, panels ship, results are scored), so a
+    cycle created directly as 'Samples Shipped' would be one whose panels were
+    never shipped.
+    """
     db_context = PTCycleDB(
         # update
         name=ptcycle.name,
@@ -63,7 +69,7 @@ async def post_ptcycle(ptcycle: PTCycle, db: AsyncSession = Depends(get_db)):
         code=ptcycle.code,
         scheme_id=ptcycle.scheme_id,
         effective_date=ptcycle.effective_date,
-        pt_cyle_status_id=ptcycle.pt_cyle_status_id,
+        pt_cyle_status_id=assist.PT_CYCLE_UPCOMING,
         closing_date=ptcycle.closing_date,
         shipping_date=ptcycle.shipping_date,
         reports_availability_date=ptcycle.reports_availability_date,
@@ -145,8 +151,26 @@ async def update_ptcycle(
             detail=f"Unable to find PT Cycle with id '{id}'",
         )
 
+    changes = ptcycle_update.dict(exclude_unset=True)
+
+    # the status belongs to the transition endpoint, which checks the move is
+    # a legal one and carries out what the step actually does. Letting an edit
+    # set it would skip both, so say so rather than quietly dropping it.
+    requested_status = changes.pop("pt_cyle_status_id", None)
+    if requested_status is not None and requested_status != ptcycle.pt_cyle_status_id:
+        current = assist.PT_CYCLE_STATUS_NAMES.get(
+            ptcycle.pt_cyle_status_id, ptcycle.pt_cyle_status_id
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The PT Cycle status cannot be changed here. It is '{current}'; "
+                "move it on from the PT Cycle page, which applies each step in turn"
+            ),
+        )
+
     # Update fields that are not None
-    for key, value in ptcycle_update.dict(exclude_unset=True).items():
+    for key, value in changes.items():
         setattr(ptcycle, key, value)
 
     try:

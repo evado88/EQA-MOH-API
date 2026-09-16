@@ -69,3 +69,26 @@ back to the size it started at.
 ```
 venv\Scripts\python.exe scripts\checks\check_users.py
 ```
+
+## checks/check_laboratories.py
+
+Audits the Laboratory Scheme List: that `vw_laboratory_scheme`
+says the same thing as the applications it is derived from, that the plain
+Laboratory List stays free of it, that the scheme listing and the laboratory
+page agree, and that a lab nobody has accepted yet is not shown as registered.
+
+```
+venv\Scripts\python.exe scripts\checks\check_laboratories.py
+```
+
+## checks/check_result_rounds.py
+
+Audits the round picker on the result listings. A listing no longer shows every
+result at once: a round has to be chosen first. This checks what the picker is
+offered (only rounds that actually have sheets, newest first, counts that add
+up) and that choosing one narrows the listing to it - for the provider's view
+of all four forms, and for a laboratory's view of its own.
+
+```
+venv\Scripts\python.exe scripts\checks\check_result_rounds.py
+```

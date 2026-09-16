@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 origins = [
         "http://localhost",
         "http://localhost:5173",
+        "http://10.222.192.196:5173",
         "https://your-frontend-domain.com",
     ]
 

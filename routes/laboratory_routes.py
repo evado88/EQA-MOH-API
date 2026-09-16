@@ -1,9 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import text
 from typing import List
 from database import get_db
-from models.laboratory_model import Laboratory, LaboratoryWithDetail, ParamLaboratoryEdit, LaboratoryDB
+from models.laboratory_model import (
+    Laboratory,
+    LaboratoryDB,
+    LaboratoryWithDetail,
+    LaboratoryWithSchemes,
+    ParamLaboratoryEdit,
+)
 # approval
 from models.stage_model import Stage
 from models.status_model import Status
@@ -96,22 +103,89 @@ async def initialize(db: AsyncSession = Depends(get_db)):
 
 
 
+async def _schemes_by_lab(db: AsyncSession, lab_ids=None):
+    """Which schemes each laboratory is registered in, keyed by laboratory.
+
+    Read from vw_laboratory_scheme rather than joined here, so the listing, the
+    laboratory page and the reports all agree on what 'registered' means.
+    """
+    sql = "SELECT * FROM vw_laboratory_scheme"
+    params = {}
+
+    if lab_ids is not None:
+        if not lab_ids:
+            return {}
+        sql += " WHERE lab_id = ANY(:lab_ids)"
+        params["lab_ids"] = list(lab_ids)
+
+    sql += " ORDER BY scheme_name"
+
+    result = await db.execute(text(sql), params)
+
+    by_lab = {}
+    for row in result.mappings().all():
+        by_lab.setdefault(row["lab_id"], []).append(dict(row))
+
+    return by_lab
+
+
+def _attach_schemes(laboratory, schemes):
+    """Hangs the scheme summary off a laboratory for the response model.
+
+    The columns are not on `laboratorys`, so they are set on the instance
+    rather than mapped. Nothing here is persisted.
+    """
+    accepted = [row for row in schemes if row["participation"] == "Accepted"]
+
+    laboratory.scheme_list = schemes
+    laboratory.scheme_count = len(schemes)
+    # everything the column shows, so filtering on it matches what is on screen
+    laboratory.scheme_names = ", ".join(row["scheme_name"] for row in schemes)
+    # the narrower answer: what the lab is actually registered in
+    laboratory.accepted_scheme_names = ", ".join(
+        row["scheme_name"] for row in accepted
+    )
+    laboratory.accepted_scheme_count = len(accepted)
+
+    return laboratory
+
+
+def _laboratory_query():
+    """The laboratory query both listings share, with its detail loaded"""
+    return select(LaboratoryDB).options(
+        selectinload(LaboratoryDB.stage),
+        selectinload(LaboratoryDB.status),
+        selectinload(LaboratoryDB.user),
+
+        selectinload(LaboratoryDB.labtype),
+        selectinload(LaboratoryDB.province),
+        selectinload(LaboratoryDB.district),
+    )
+
+
 @router.get("/list", response_model=List[LaboratoryWithDetail])
 async def list_laboratorys(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(
-            LaboratoryDB
-        ).options(
-            selectinload(LaboratoryDB.stage),
-            selectinload(LaboratoryDB.status),
-            selectinload(LaboratoryDB.user),
-            
-            selectinload(LaboratoryDB.labtype),
-            selectinload(LaboratoryDB.province),
-            selectinload(LaboratoryDB.district),
-        )
-    )
+    """Every laboratory and its registration detail.
+
+    The flat listing. For the schemes each one takes part in, see
+    /laboratorys/scheme-list.
+    """
+    result = await db.execute(_laboratory_query())
+    return result.scalars().all()
+
+
+@router.get("/scheme-list", response_model=List[LaboratoryWithSchemes])
+async def list_laboratory_schemes(db: AsyncSession = Depends(get_db)):
+    """Every laboratory, with the schemes it applied to and how each stands."""
+    result = await db.execute(_laboratory_query())
     laboratorys = result.scalars().all()
+
+    # one query for the whole page rather than one per laboratory
+    by_lab = await _schemes_by_lab(db, [lab.id for lab in laboratorys])
+
+    for laboratory in laboratorys:
+        _attach_schemes(laboratory, by_lab.get(laboratory.id, []))
+
     return laboratorys
 
 @router.put("/update/{id}", response_model=Laboratory)
@@ -163,6 +237,10 @@ async def get_laboratory(id: int, db: AsyncSession = Depends(get_db)):
             raise HTTPException(
                 status_code=404, detail=f"Unable to find 'Laboratory with id '{id}' not found"
             )
+
+        # the same scheme summary the listing shows, so the page agrees with it
+        by_lab = await _schemes_by_lab(db, [laboratoryItem.id])
+        _attach_schemes(laboratoryItem, by_lab.get(laboratoryItem.id, []))
 
     # get supporting models if available
 

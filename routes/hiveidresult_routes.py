@@ -20,7 +20,7 @@ from models.stage_model import Stage
 from models.status_model import Status
 from models.user_model import User, UserDB
 from models.review_model import Review
-from helpers import assist
+from helpers import assist, resultquery
 from sqlalchemy.orm import selectinload
 # relations
 from models.scheme_model import SchemeDB
@@ -108,6 +108,18 @@ async def initialize(db: AsyncSession = Depends(get_db)):
         "message": "Items for HIV-1 EID Result have been successfully initialized",
     }
 
+
+
+
+@router.get("/cycles")
+async def list_cycles_with_results(
+    lab_id: Optional[int] = Query(
+        default=None, description="Only rounds this laboratory has sheets for"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """The rounds a HIV-1 EID listing can be opened on, newest first."""
+    return await resultquery.cycles_with_results(db, HIVEIDResultDB, lab_id=lab_id)
 
 
 def _result_query():

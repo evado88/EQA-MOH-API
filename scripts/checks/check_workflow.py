@@ -183,6 +183,32 @@ async def run():
         check("cycle created", r.status_code == 200, r.text[:300])
         cycle_id = r.json()["id"]
 
+        # the status is not the caller's to choose
+        no_status = {k: v for k, v in cyc.items() if k != "pt_cyle_status_id"}
+        r = await c.post("/pt-cycles/create", json=dict(no_status, code="2026-A-NS"))
+        check("a cycle can be created without naming a status",
+              r.status_code == 200, r.text[:200])
+        check("and it opens as Upcoming",
+              r.status_code == 200
+              and r.json()["pt_cyle_status_id"] == assist.PT_CYCLE_UPCOMING,
+              r.text[:200])
+
+        r = await c.post("/pt-cycles/create",
+                         json=dict(cyc, code="2026-A-CLOSED",
+                                   pt_cyle_status_id=assist.PT_CYCLE_CLOSED))
+        check("a cycle cannot be created already Closed",
+              r.status_code == 200
+              and r.json()["pt_cyle_status_id"] == assist.PT_CYCLE_UPCOMING,
+              r.text[:200])
+
+        r = await c.put(f"/pt-cycles/update/{cycle_id}",
+                        json=dict(cyc, pt_cyle_status_id=assist.PT_CYCLE_SAMPLES_SHIPPED))
+        check("an edit cannot move the status", r.status_code == 400, r.text[:200])
+
+        r = await c.put(f"/pt-cycles/update/{cycle_id}", json=dict(cyc, description="edited"))
+        check("but an edit that leaves it alone is fine",
+              r.status_code == 200, r.text[:200])
+
         r = await c.put(f"/pt-cycles/status/{cycle_id}",
                         json={"pt_cyle_status_id": assist.PT_CYCLE_STARTED, "user_id": 1})
         check("unapproved cycle cannot be started", r.status_code == 400, r.text[:200])

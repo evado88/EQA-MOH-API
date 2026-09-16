@@ -174,6 +174,25 @@ class Laboratory(BaseModel):
     class Config:
         orm_mode = True     
 
+class LaboratoryScheme(BaseModel):
+    """One scheme a laboratory applied to, as vw_laboratory_scheme sees it"""
+
+    scheme_id: int
+    scheme_name: str
+    provider_name: Optional[str] = None
+    method_count: int = 0
+    accepted_count: int = 0
+    pending_count: int = 0
+    rejected_count: int = 0
+    method_names: Optional[str] = None
+    accepted_method_names: Optional[str] = None
+    # Accepted, Pending or Rejected
+    participation: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
 class LaboratoryWithDetail(Laboratory):
     stage: Stage
     status: Status
@@ -184,8 +203,30 @@ class LaboratoryWithDetail(Laboratory):
     province: Province
     district: District
 
+
+class LaboratoryWithSchemes(LaboratoryWithDetail):
+    """A laboratory and the schemes it applied to.
+
+    Kept apart from `LaboratoryWithDetail` so the plain laboratory listing
+    stays exactly what it was - the scheme summary costs a second query and a
+    good deal of payload, and only the pages that show it should pay for it.
+    """
+
+    # which schemes the lab applied to, and how each stands. Empty for a
+    # registration nobody has reviewed yet.
+    scheme_list: Optional[List[LaboratoryScheme]] = []
+    # every scheme in scheme_list as one string. This is what a listing filters
+    # and searches on, so the filter matches what the column actually shows -
+    # including a scheme the lab applied to but was not accepted for.
+    scheme_names: Optional[str] = None
+    scheme_count: Optional[int] = 0
+    # the narrower answer: the schemes the lab is actually registered in
+    accepted_scheme_names: Optional[str] = None
+    accepted_scheme_count: Optional[int] = 0
+
 class ParamLaboratoryEdit(BaseModel):
-    laboratory: Optional[LaboratoryWithDetail] = None
+    # the one-laboratory page shows its schemes, so it gets the fuller model
+    laboratory: Optional[LaboratoryWithSchemes] = None
     labtypeList: Optional[List[LabType]] = []
     provinceList: Optional[List[Province]] = []
     districtList: Optional[List[District]] = []

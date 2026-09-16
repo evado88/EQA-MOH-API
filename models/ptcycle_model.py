@@ -100,9 +100,12 @@ class PTCycle(BaseModel):
         ...,
         description="Effective Date must be provided",
     )
-    pt_cyle_status_id: int = Field(
-        ...,
-        description="PT Cycle Status must be provided",
+    # Not asked for when a cycle is created - a new cycle is always Upcoming -
+    # and not changed by an edit either. It moves one step at a time through
+    # /pt-cycles/status/{id}, which is where the side effects of each step live.
+    pt_cyle_status_id: Optional[int] = Field(
+        default=None,
+        description="Set by the server. A new PT Cycle always starts as Upcoming",
     )
     closing_date: date = Field(
         ...,
