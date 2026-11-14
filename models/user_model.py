@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, root_validator
 from typing import Optional, List
@@ -32,7 +32,9 @@ class UserDB(Base):
 
     # account
     role_id = Column(Integer, nullable=False)
-    password = Column(String, nullable=False)
+    # nullable: a self-registered user has no password until they follow the
+    # verification link and set one (see /auth/verify, /auth/set-password)
+    password = Column(String, nullable=True)
 
     # approval
     status_id = Column(Integer, ForeignKey("list_statuses.id"), nullable=False)
@@ -40,6 +42,23 @@ class UserDB(Base):
 
     # laboratory
     laboratory_id = Column(Integer, ForeignKey("laboratorys.id"), nullable=True)
+
+    # the scheme a provider scheme-team member (roles 2-8) is tied to; NULL for
+    # Administrator, MOH and facility roles, which are not scoped to one scheme
+    scheme_id = Column(Integer, ForeignKey("schemes.id"), nullable=True)
+
+    # self-registration: where the person is and which facility they belong to.
+    # A Zambian user carries facility_id from the MFL; elsewhere facility_name
+    # is typed free-hand (see migration 013).
+    country = Column(String, nullable=True)
+    facility_id = Column(Integer, ForeignKey("facilities.id"), nullable=True)
+    facility_name = Column(String, nullable=True)
+
+    # email verification
+    email_verified = Column(Boolean, nullable=False, default=False)
+    verification_token = Column(String, nullable=True, index=True)
+    verification_sent_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
 
     # province, district
     province_id = Column(Integer, ForeignKey("provinces.id"), nullable=True)
@@ -75,10 +94,21 @@ class UserDB(Base):
     districts = relationship("DistrictDB", back_populates="user", foreign_keys="DistrictDB.user_id")
     district = relationship("DistrictDB", foreign_keys=[district_id])
     ptcyclestatus = relationship("PTCycleStatusDB", back_populates="user")
-    scheme = relationship("SchemeDB", back_populates="user")
+    # schemes this user created (SchemeDB.user_id). Distinct from scheme_tied
+    # above (UserDB.scheme_id); both FK paths exist now, so spell this one out.
+    scheme = relationship(
+        "SchemeDB", back_populates="user", foreign_keys="SchemeDB.user_id"
+    )
     labtype = relationship("LabTypeDB", back_populates="user")
     laboratories = relationship("LaboratoryDB", back_populates="user", foreign_keys="LaboratoryDB.user_id")
     laboratory = relationship("LaboratoryDB", foreign_keys=[laboratory_id])
+    # the facility this self-registered user belongs to (Zambia, from the MFL)
+    facility = relationship("FacilityDB", foreign_keys=[facility_id], lazy="selectin")
+    # the scheme a scheme-team role is tied to (distinct from `scheme`, which is
+    # the schemes this user created)
+    scheme_tied = relationship(
+        "SchemeDB", foreign_keys=[scheme_id], viewonly=True, lazy="selectin"
+    )
     service = relationship("ServiceDB", back_populates="user")
     method = relationship("MethodDB", back_populates="user")
     methodsample = relationship("MethodSampleDB", back_populates="user")
@@ -172,6 +202,9 @@ class User(BaseModel):
         default=None, ge=1, description="Laboratory must be greater than or equal to 1"
     )
 
+    # the scheme a scheme-team role is tied to
+    scheme_id: Optional[int] = Field(default=None, ge=1)
+
     # province, district
     province_id: Optional[int] = Field(
         default=None, ge=1, description="Province must be greater than or equal to 1"
@@ -235,6 +268,15 @@ class UserProvince(BaseModel):
         orm_mode = True
 
 
+class UserScheme(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+    code: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
 class UserDistrict(BaseModel):
     id: Optional[int] = None
     name: Optional[str] = None
@@ -277,6 +319,10 @@ class UserWithDetail(BaseModel):
     # where they work; provider staff belong to no laboratory
     laboratory_id: Optional[int] = None
     laboratory: Optional[UserLaboratory] = None
+
+    # the scheme a scheme-team role is tied to
+    scheme_id: Optional[int] = None
+    scheme_tied: Optional[UserScheme] = None
 
     province_id: Optional[int] = None
     district_id: Optional[int] = None
@@ -334,6 +380,8 @@ class UserSave(BaseModel):
     role_id: int = Field(..., ge=1, le=100, description="Role must be provided")
     # a laboratory role reports for one laboratory; provider staff for none
     laboratory_id: Optional[int] = Field(default=None, ge=1)
+    # a scheme-team role is tied to one scheme
+    scheme_id: Optional[int] = Field(default=None, ge=1)
     province_id: Optional[int] = Field(default=None, ge=1)
     district_id: Optional[int] = Field(default=None, ge=1)
 
@@ -359,6 +407,7 @@ class UserSave(BaseModel):
         """
         role_id = values.get("role_id")
         laboratory_id = values.get("laboratory_id")
+        scheme_id = values.get("scheme_id")
 
         if role_id is None:
             return values
@@ -373,6 +422,18 @@ class UserSave(BaseModel):
                 "Only a facility role can be linked to a laboratory"
             )
 
+        # scheme-team roles (2-8) are tied to exactly one scheme; Administrator,
+        # MOH and facility roles are not
+        if assist.requires_scheme(role_id):
+            if not scheme_id:
+                raise ValueError(
+                    "A scheme-team role must be tied to a scheme"
+                )
+        elif scheme_id:
+            raise ValueError(
+                "Only a scheme-team role can be tied to a scheme"
+            )
+
         return values
 
     class Config:
@@ -385,8 +446,58 @@ class ParamUserEdit(BaseModel):
     user: Optional[UserWithDetail] = None
     roleList: Optional[List[UserRole]] = []
     laboratoryList: Optional[List[UserLaboratory]] = []
+    schemeList: Optional[List[UserScheme]] = []
     provinceList: Optional[List[UserProvince]] = []
     districtList: Optional[List[UserDistrict]] = []
 
     class Config:
         orm_mode = True
+
+
+# -------------------------- public self-registration --------------------------
+class ParamUserSignup(BaseModel):
+    """Posted by a person registering themselves at /auth/signup.
+
+    Deliberately tiny: country, name, position, phone and email, plus a
+    facility. A Zambian user sends facility_id (chosen from the MFL); anyone
+    else sends facility_name, typed free-hand. No password, no role, no
+    approval state - the server owns all of those, and the password is set
+    later through the verification link.
+    """
+
+    country: str = Field(..., min_length=2, description="Country must be provided")
+    name: str = Field(..., min_length=2, description="Name must be provided")
+    position: str = Field(..., min_length=2, description="Position must be provided")
+    phone_number: str = Field(
+        ..., min_length=6, max_length=20, description="Phone Number must be provided"
+    )
+    email: EmailStr
+
+    # Zambia: chosen from the master facility list. Elsewhere: typed in.
+    facility_id: Optional[int] = Field(default=None, ge=1)
+    facility_name: Optional[str] = None
+
+
+class UserSignupResult(BaseModel):
+    succeeded: bool
+    message: str
+    email: str
+
+
+class ParamVerifyToken(BaseModel):
+    """Used to look up an account from the verification link's token."""
+
+    token: str = Field(..., min_length=8)
+
+
+class ParamSetPassword(BaseModel):
+    """Follows the verification link: proves the email and sets the password in
+    one step, after which the account is active and can sign in."""
+
+    token: str = Field(..., min_length=8)
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=255,
+        description="Password must be at least 8 characters",
+    )

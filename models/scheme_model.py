@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, Integer, String, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Float, Integer, String, Date, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel,  Field
 from typing import Optional, Optional, Any, List
@@ -22,6 +22,15 @@ class SchemeDB(Base):
     # name
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
+    # short code used to build a lab's per-scheme registration number, e.g. TB
+    code = Column(String, nullable=True)
+
+    # controlled-document metadata for this scheme's application form
+    form_control_number = Column(String, nullable=True)
+    form_version = Column(String, nullable=True)
+    # authority named in the terms agreement ("...as provided by <X>")
+    form_terms_authority = Column(String, nullable=True)
+    requires_confidentiality_waiver = Column(Boolean, nullable=False, default=False)
 
     # properties
     provider_id = Column(Integer, ForeignKey("providers.id"), nullable=False)
@@ -54,7 +63,11 @@ class SchemeDB(Base):
     updated_by = Column(String, nullable=True)
     
     #relationships
-    user = relationship("UserDB", back_populates="scheme", lazy='raise')
+    # the user who created this scheme (schemes.user_id). users.scheme_id now
+    # also links the two tables, so this join is spelled out to stay unambiguous.
+    user = relationship(
+        "UserDB", back_populates="scheme", foreign_keys=[user_id], lazy='raise'
+    )
     status = relationship("StatusDB", back_populates="scheme", lazy='raise')
     stage = relationship("StageDB", back_populates="scheme", lazy='raise')
     provider = relationship("ProviderDB", back_populates="scheme", lazy='raise')
@@ -85,6 +98,11 @@ class Scheme(BaseModel):
         description="Name must be between at least 2 characters",
     )
     description: Optional[str] = None
+    code: Optional[str] = None
+    form_control_number: Optional[str] = None
+    form_version: Optional[str] = None
+    form_terms_authority: Optional[str] = None
+    requires_confidentiality_waiver: Optional[bool] = False
 
     # properties
     provider_id: int = Field(
@@ -139,6 +157,46 @@ class SchemeWithDetail(Scheme):
 class ParamSchemeEdit(BaseModel):
     scheme: Optional[SchemeWithDetail] = None
     providerList: Optional[List[Provider]] = []
+
+    class Config:
+        orm_mode = True
+
+
+# ------------------------ scheme catalogue (tiles page) ----------------------
+class CatalogueMethod(BaseModel):
+    id: int
+    name: str
+    service_id: int
+
+    class Config:
+        orm_mode = True
+
+
+class CatalogueService(BaseModel):
+    id: int
+    name: str
+    methods: List[CatalogueMethod] = []
+
+    class Config:
+        orm_mode = True
+
+
+class SchemeTile(BaseModel):
+    """One scheme as the selection page shows it: enough to draw a tile and,
+    on selection, drive the per-scheme registration form's method picker."""
+
+    id: int
+    name: str
+    code: Optional[str] = None
+    description: Optional[str] = None
+    provider_name: Optional[str] = None
+    method_count: int = 0
+    services: List[CatalogueService] = []
+    # controlled-document metadata for the application form
+    form_control_number: Optional[str] = None
+    form_version: Optional[str] = None
+    form_terms_authority: Optional[str] = None
+    requires_confidentiality_waiver: bool = False
 
     class Config:
         orm_mode = True

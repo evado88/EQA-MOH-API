@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, Integer, String, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Float, Integer, String, Date, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Optional, Any, List
@@ -15,10 +15,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 # ---------- SQLAlchemy Models ----------
 class LaboratoryDB(Base):
     __tablename__ = "laboratorys"
-    # a lab is identified by its code and registers one contact email
+    # a lab is identified by its code. The contact email is no longer unique:
+    # one verified user (one email) may register the same facility for several
+    # schemes, each as its own reviewable laboratory row (see migration 015).
     __table_args__ = (
         UniqueConstraint("code", name="uq_laboratorys_code"),
-        UniqueConstraint("email_address", name="uq_laboratorys_email_address"),
     )
 
     # id
@@ -40,6 +41,17 @@ class LaboratoryDB(Base):
     physical_address = Column(String, nullable=False)
     # method list
     method_list = Column(JSONB, nullable=False)
+    # the facility (MFL) this registration is for, and the verified user who
+    # lodged it. facility_id is null for a non-Zambian facility typed free-hand.
+    facility_id = Column(Integer, ForeignKey("facilities.id"), nullable=True)
+    registered_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # the controlled-document version the lab agreed to, snapshotted at
+    # submission, plus the terms acceptance and (TB only) confidentiality waiver
+    form_control_number = Column(String, nullable=True)
+    form_version = Column(String, nullable=True)
+    terms_accepted = Column(Boolean, nullable=False, default=False)
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    confidentiality_waiver = Column(Boolean, nullable=True)
     # approval
     # user - null until an admin approves the registration and the lab account is created
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -70,6 +82,8 @@ class LaboratoryDB(Base):
     
     #relationships
     user = relationship("UserDB", back_populates="laboratories", foreign_keys=[user_id], lazy='raise')
+    facility = relationship("FacilityDB", foreign_keys=[facility_id], lazy='raise')
+    registered_by = relationship("UserDB", foreign_keys=[registered_by_user_id], lazy='raise')
     status = relationship("StatusDB", back_populates="laboratory", lazy='raise')
     stage = relationship("StageDB", back_populates="laboratory", lazy='raise')
     labtype = relationship("LabTypeDB", back_populates="laboratory", lazy='raise')
@@ -137,6 +151,15 @@ class Laboratory(BaseModel):
     )
     # method list
     method_list: list[dict[str, Any]]= Field(..., description="The EQA Scheme selection list must be provided")
+    # facility linkage
+    facility_id: Optional[int] = None
+    registered_by_user_id: Optional[int] = None
+    # controlled-document agreement snapshot
+    form_control_number: Optional[str] = None
+    form_version: Optional[str] = None
+    terms_accepted: Optional[bool] = None
+    terms_accepted_at: Optional[datetime] = None
+    confidentiality_waiver: Optional[bool] = None
     # approval
     # user
     user_id: Optional[int] = None
@@ -283,3 +306,66 @@ class LaboratorySignupResult(BaseModel):
     laboratory_id: int
     code: str
     application_count: int
+
+
+# ----------------------- per-scheme registration (new flow) ------------------
+class ParamSchemeRegistration(BaseModel):
+    """Posted by a signed-in, verified user registering their facility for one
+    scheme.
+
+    Most of the contact detail comes from the user's own profile; the form
+    fills in the laboratory specifics (type, address) and the methods within
+    the chosen scheme. The server derives province/district from the facility
+    when they are not supplied, assigns the per-scheme registration number and
+    decides the approval state.
+    """
+
+    # who is registering (their account must exist and be verified)
+    user_email: EmailStr
+
+    # the single scheme being registered for
+    scheme_id: int = Field(..., ge=1, description="Scheme must be provided")
+
+    # the laboratory being registered
+    name: str = Field(..., min_length=2, description="Laboratory name must be provided")
+    description: Optional[str] = None
+    lab_type_id: int = Field(..., ge=1, description="Type of Lab must be provided")
+    physical_address: str = Field(
+        ..., min_length=2, description="Physical Address must be provided"
+    )
+    # optional overrides; otherwise taken from the user / facility
+    contact_person_name: Optional[str] = None
+    position: Optional[str] = None
+    phone_number: Optional[str] = None
+    province_id: Optional[int] = Field(default=None, ge=1)
+    district_id: Optional[int] = Field(default=None, ge=1)
+
+    # Zambia: the chosen facility. Elsewhere: a free-typed name.
+    facility_id: Optional[int] = Field(default=None, ge=1)
+    facility_name: Optional[str] = None
+
+    # the methods within this scheme the lab is applying for
+    method_list: List[SignupMethod] = Field(
+        ..., min_items=1, description="At least one method must be selected"
+    )
+
+    # controlled-document agreement: the lab must accept the scheme's terms, and
+    # for schemes that ask it (TB) must answer the confidentiality waiver
+    terms_accepted: bool = False
+    # True = waives confidentiality, False = keeps it, None = scheme does not ask
+    confidentiality_waiver: Optional[bool] = None
+
+    # the user has seen and accepted the "already registered" warning
+    acknowledge_duplicate: bool = False
+
+
+class SchemeRegistrationResult(BaseModel):
+    succeeded: bool
+    message: str
+    laboratory_id: int
+    code: str
+    registration_number: str
+    application_count: int
+    # true when another user had already registered this facility for this
+    # scheme; the submission still goes through for the administrator to decide
+    duplicate_warning: bool = False

@@ -27,20 +27,53 @@ ROLE_EQA_FOCAL_POINT = 7
 ROLE_DISTRICT_LAB_COORDINATOR = 8
 ROLE_FACILITY_SUPER_USER = 9
 ROLE_FACILITY_STAFF = 10
+# the Ministry of Health: works across every scheme, like a provider role, but
+# may not perform system administration (managing users, the catalogue, ...)
+ROLE_MINISTRY_OF_HEALTH = 11
 
 # roles that belong to a participating laboratory rather than to the provider
 LABORATORY_ROLES = (ROLE_FACILITY_SUPER_USER, ROLE_FACILITY_STAFF)
+# a facility super user may enter and edit their facility's data; facility staff
+# (management / supervisors) may only view it
+FACILITY_WRITE_ROLES = (ROLE_FACILITY_SUPER_USER,)
+FACILITY_READONLY_ROLES = (ROLE_FACILITY_STAFF,)
 
 # issued to a lab super user when its registration is approved; the lab is
 # expected to change it on first sign in
 DEFAULT_LAB_PASSWORD = "12345678"
 
-# roles that may administer the scheme (start cycles, review applications, ...)
+# system administration (managing users, roles, the whole catalogue, imports)
+# is reserved to the Administrator alone
+SYSTEM_ADMIN_ROLES = (ROLE_ADMINISTRATOR,)
+
+# the scheme team: every one of these is tied to a single scheme and only ever
+# sees and acts on that scheme's data
+SCHEME_TEAM_ROLES = (
+    ROLE_SCHEME_HEAD,
+    ROLE_SCHEME_COORDINATOR,
+    ROLE_SCHEME_QUALITY_OFFICER,
+    ROLE_FINANCE_OFFICER,
+    ROLE_PROVINCIAL_BIOMEDICAL_SCIENTIST,
+    ROLE_EQA_FOCAL_POINT,
+    ROLE_DISTRICT_LAB_COORDINATOR,
+)
+
+# provider-side roles that work across every scheme without being tied to one
+CROSS_SCHEME_ROLES = (ROLE_ADMINISTRATOR, ROLE_MINISTRY_OF_HEALTH)
+
+# every provider-side (non-facility) role
+PROVIDER_ROLES = SCHEME_TEAM_ROLES + CROSS_SCHEME_ROLES
+
+# roles that may administer the scheme's operations (start cycles, review
+# applications, post announcements, grade results). This is the scheme
+# management trio plus the cross-scheme roles; the wider scheme team
+# (finance, PBs, FPPs, district coordinators) take part but do not administer.
 ADMIN_ROLES = (
     ROLE_ADMINISTRATOR,
     ROLE_SCHEME_HEAD,
     ROLE_SCHEME_COORDINATOR,
     ROLE_SCHEME_QUALITY_OFFICER,
+    ROLE_MINISTRY_OF_HEALTH,
 )
 
 # pt cycle statuses - must match the order of the list seeded by
@@ -246,8 +279,54 @@ def is_laboratory_role(role_id: int) -> bool:
 
 
 def is_admin_role(role_id: int) -> bool:
-    """Returns true when the specified role may administer the scheme"""
+    """Returns true when the specified role may administer the scheme's operations"""
     return role_id in ADMIN_ROLES
+
+
+def is_system_admin(role_id: int) -> bool:
+    """Only the Administrator may perform system administration (manage users,
+    roles and the catalogue)."""
+    return role_id in SYSTEM_ADMIN_ROLES
+
+
+def is_cross_scheme(role_id: int) -> bool:
+    """Returns true for roles that work across every scheme (Administrator, MOH)"""
+    return role_id in CROSS_SCHEME_ROLES
+
+
+def is_scheme_team(role_id: int) -> bool:
+    """Returns true for a scheme-team role, each tied to a single scheme"""
+    return role_id in SCHEME_TEAM_ROLES
+
+
+def is_provider_role(role_id: int) -> bool:
+    """Returns true for any provider-side (non-facility) role"""
+    return role_id in PROVIDER_ROLES
+
+
+def can_write_facility(role_id: int) -> bool:
+    """A facility super user may enter/edit data; facility staff may only view"""
+    return role_id in FACILITY_WRITE_ROLES
+
+
+def requires_scheme(role_id: int) -> bool:
+    """Scheme-team roles must be tied to exactly one scheme"""
+    return role_id in SCHEME_TEAM_ROLES
+
+
+def scheme_scope_for(user) -> "int | None":
+    """The scheme a user is confined to, or None for anyone who sees them all.
+
+    Cross-scheme and system-admin roles (Administrator, MOH) see every scheme;
+    a scheme-team member sees only their own; anyone else (facility) is not
+    scoped this way and is handled by laboratory ownership instead.
+    """
+    role_id = getattr(user, "role_id", None)
+    if role_id in CROSS_SCHEME_ROLES:
+        return None
+    if role_id in SCHEME_TEAM_ROLES:
+        return getattr(user, "scheme_id", None)
+    return None
 
 SECRET_KEY = "your-secret-key"
 ALGORITHM = "HS256"

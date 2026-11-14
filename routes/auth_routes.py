@@ -4,22 +4,27 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy.orm import selectinload
-from typing import List
-from jose import JWTError, jwt
+from jose import jwt
+
 import helpers.assist as assist
-from models.applications_model import ApplicationsDB
-from models.laboratory_model import (
-    LaboratoryDB,
-    LaboratorySignupResult,
-    ParamLaboratorySignup,
+from helpers import mailer
+from models.facility_model import FacilityDB
+from models.user_model import (
+    UserDB,
+    ParamUserSignup,
+    UserSignupResult,
+    ParamVerifyToken,
+    ParamSetPassword,
 )
-from models.method_model import MethodDB
-from models.user_model import UserDB
-from routes.laboratory_routes import _next_laboratory_code
 from database import get_db
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+ZAMBIA_NAMES = {"zambia", "zm", "zmb"}
+
+
+def _is_zambia(country: str) -> bool:
+    return (country or "").strip().lower() in ZAMBIA_NAMES
 
 
 @router.post("/login")
@@ -35,7 +40,9 @@ async def login(
                 detail=f"The specified username or password is incorrect",
         )
 
-    if not assist.verify_password(form_data.password, user.password):
+    # a self-registered account has no password until the verification link is
+    # used - until then there is nothing to sign in with
+    if not user.password or not assist.verify_password(form_data.password, user.password):
         raise HTTPException(
             status_code=401, detail=f"The specified username or password is incorrect"
         )
@@ -44,7 +51,7 @@ async def login(
     if user.status_id != assist.STATUS_APPROVED:
         raise HTTPException(
             status_code=403,
-            detail="Your account is not active. Please contact the scheme administrator.",
+            detail="Your account is not active. Please verify your email or contact the scheme administrator.",
         )
 
     to_encode = {
@@ -54,7 +61,14 @@ async def login(
         "role": user.role_id,
         # the lab this user reports results for, absent for provider staff
         "lab": user.laboratory_id,
+        # the scheme a scheme-team role is tied to; null for Administrator/MOH
+        "scheme_id": user.scheme_id,
         "mobile": user.mobile,
+        # the facility this user registered under, so the scheme-registration
+        # page can link a new laboratory to it without a second lookup
+        "facility_id": user.facility_id,
+        "facility_name": user.facility_name,
+        "position": user.position,
         "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
         "jti": uuid4().hex,
     }
@@ -63,129 +77,206 @@ async def login(
     return {"access_token": token, "token_type": "bearer"}
 
 
-@router.post("/signup", response_model=LaboratorySignupResult)
-async def signup(
-    signup: ParamLaboratorySignup, db: AsyncSession = Depends(get_db)
-):
-    """Registers a laboratory for EQA.
+# --------------------------------------------------------------------------
+# Self-registration
+#
+# A person registers themselves with a handful of fields and proves their
+# email through a verification link, which is also where they set a password.
+# Registering a laboratory for a scheme happens later, once signed in - see
+# routes/registration_routes.py.
+# --------------------------------------------------------------------------
+async def _issue_verification(db, user: UserDB):
+    """Give the user a fresh token and email them the link.
 
-    This is the only public way into the system, and it only ever produces a
-    laboratory - never a provider or administrator account. The registration is
-    created as submitted for review; the user account itself is only created
-    once an administrator approves it (see /laboratorys/review-update).
+    The row is committed before the send, so a user always exists to resend to;
+    a send failure is surfaced to the caller but does not lose the account.
     """
-    email = signup.email_address.lower().strip()
+    user.verification_token = uuid4().hex
+    user.verification_sent_at = assist.get_current_date(False)
+    await db.commit()
 
-    # the contact email doubles as the eventual sign in name, so it has to be
-    # free on both sides
+    try:
+        await mailer.send_verification_email(
+            user.email, f"{user.fname} {user.lname}".strip(), user.verification_token
+        )
+    except Exception as e:  # pragma: no cover - depends on the mail server
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Your details were saved but the verification email could not be "
+                "sent. Please try registering again in a few minutes."
+            ),
+        ) from e
+
+
+@router.post("/signup", response_model=UserSignupResult)
+async def signup(signup: ParamUserSignup, db: AsyncSession = Depends(get_db)):
+    """Public self-registration. Captures the person, not a laboratory.
+
+    Creates an unverified account and emails a verification link. The account
+    cannot sign in until the link is followed and a password is set.
+    """
+    email = signup.email.lower().strip()
+    is_zambia = _is_zambia(signup.country)
+
+    # resolve the facility: Zambia picks from the MFL, elsewhere types a name
+    facility = None
+    facility_name = (signup.facility_name or "").strip() or None
+    province_id = None
+    district_id = None
+
+    if signup.facility_id:
+        result = await db.execute(
+            select(FacilityDB).where(FacilityDB.id == signup.facility_id)
+        )
+        facility = result.scalars().first()
+        if not facility:
+            raise HTTPException(
+                status_code=400, detail="The selected facility could not be found"
+            )
+        facility_name = facility.name
+        province_id = facility.province_id
+        district_id = facility.district_id
+    elif is_zambia and not facility_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Please choose your facility from the master facility list",
+        )
+    elif not facility_name:
+        raise HTTPException(
+            status_code=400, detail="Please enter the name of your facility"
+        )
+
+    first_name, last_name = assist.extract_names(signup.name)
+
+    # an account may already exist for this email
     result = await db.execute(select(UserDB).where(UserDB.email == email))
-    if result.scalars().first():
+    existing = result.scalars().first()
+
+    if existing and existing.email_verified:
         raise HTTPException(
             status_code=400,
-            detail="The email address has already been registered",
+            detail="This email address is already registered. Please sign in instead.",
         )
 
-    result = await db.execute(
-        select(LaboratoryDB).where(LaboratoryDB.email_address == email)
-    )
-    if result.scalars().first():
-        raise HTTPException(
-            status_code=400,
-            detail="The email address has already been registered",
+    if existing:
+        # not yet verified - refresh the details and resend the link rather
+        # than refusing, so a mistyped-then-retried sign up just works
+        existing.fname = first_name
+        existing.lname = last_name or first_name
+        existing.position = signup.position.strip()
+        existing.mobile = signup.phone_number.strip()
+        existing.mobile_code = "+260" if is_zambia else "+"
+        existing.country = signup.country.strip()
+        existing.facility_id = facility.id if facility else None
+        existing.facility_name = facility_name
+        existing.province_id = province_id
+        existing.district_id = district_id
+        await _issue_verification(db, existing)
+        return UserSignupResult(
+            succeeded=True,
+            message=(
+                "You have already started registering with this email. We have sent "
+                "a fresh verification link - please check your inbox."
+            ),
+            email=email,
         )
 
-    # resolve the selected methods so the application rows carry the whole
-    # scheme -> service -> method chain rather than the client's word for it
-    method_ids = sorted({item.id for item in signup.method_list})
-    result = await db.execute(select(MethodDB).where(MethodDB.id.in_(method_ids)))
-    methods = result.scalars().all()
-
-    if len(methods) != len(method_ids):
-        found = {method.id for method in methods}
-        missing = [str(id) for id in method_ids if id not in found]
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unable to find the selected method(s): {', '.join(missing)}",
-        )
-
-    db_laboratory = LaboratoryDB(
-        # name
-        name=signup.name.strip(),
-        description=signup.description,
-        # properties
-        contact_person_name=signup.contact_person_name.strip(),
-        code=await _next_laboratory_code(db),
-        lab_type_id=signup.lab_type_id,
+    user = UserDB(
+        # personal details
+        fname=first_name,
+        lname=last_name or first_name,
         position=signup.position.strip(),
-        phone_number=signup.phone_number.strip(),
-        province_id=signup.province_id,
-        email_address=email,
-        district_id=signup.district_id,
-        physical_address=signup.physical_address.strip(),
-        # the methods as selected, kept for the reviewer to see
-        method_list=[
-            {
-                "id": method.id,
-                "name": method.name,
-                "scheme_id": method.scheme_id,
-                "service_id": method.service_id,
-            }
-            for method in methods
-        ],
-        # approval - a registration always arrives awaiting review
-        user_id=None,
+        # contact
+        email=email,
+        mobile_code="+260" if is_zambia else "+",
+        mobile=signup.phone_number.strip(),
+        # self-registration
+        country=signup.country.strip(),
+        facility_id=facility.id if facility else None,
+        facility_name=facility_name,
+        province_id=province_id,
+        district_id=district_id,
+        # account - a self-registered user is always a facility super user,
+        # with no password and pending until the email is verified
+        role_id=assist.ROLE_FACILITY_SUPER_USER,
+        password=None,
         status_id=assist.STATUS_SUBMITTED,
-        stage_id=assist.APPROVAL_STAGE_SUBMITTED,
+        stage_id=assist.APPROVAL_STAGE_AWAIT_SUBMISSION,
         approval_levels=1,
-        # service
+        email_verified=False,
         created_by=email,
     )
-    db.add(db_laboratory)
+    db.add(user)
 
     try:
         await db.flush()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"Could not register the laboratory: {e}"
-        )
+        raise HTTPException(status_code=400, detail=f"Could not register: {e}")
 
-    # one application per method, so each method can be accepted or rejected
-    # on its own merits
-    for method in methods:
-        db.add(
-            ApplicationsDB(
-                name=f"{db_laboratory.name} - {method.name}",
-                description=f"Application by {db_laboratory.name} to take part in {method.name}",
-                lab_id=db_laboratory.id,
-                scheme_id=method.scheme_id,
-                service_id=method.service_id,
-                method_id=method.id,
-                user_id=None,
-                status_id=assist.STATUS_SUBMITTED,
-                stage_id=assist.APPROVAL_STAGE_SUBMITTED,
-                approval_levels=1,
-                created_by=email,
-            )
+    await _issue_verification(db, user)
+
+    return UserSignupResult(
+        succeeded=True,
+        message=(
+            "Registration received. Please check your email for a link to verify "
+            "your address and set your password."
+        ),
+        email=email,
+    )
+
+
+async def _user_for_token(db, token: str) -> UserDB:
+    result = await db.execute(
+        select(UserDB).where(UserDB.verification_token == token)
+    )
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="This verification link is invalid or has already been used.",
         )
+    return user
+
+
+@router.get("/verify/{token}")
+async def verify_lookup(token: str, db: AsyncSession = Depends(get_db)):
+    """Check a verification token and return who it belongs to, so the
+    set-password page can greet the user. Does not finalize anything."""
+    user = await _user_for_token(db, token)
+    return {
+        "email": user.email,
+        "name": f"{user.fname} {user.lname}".strip(),
+        "already_verified": user.email_verified,
+    }
+
+
+@router.post("/set-password", response_model=UserSignupResult)
+async def set_password(payload: ParamSetPassword, db: AsyncSession = Depends(get_db)):
+    """Follow the verification link: prove the email and set the password.
+
+    This is the one step that activates a self-registered account.
+    """
+    user = await _user_for_token(db, payload.token)
+
+    user.password = assist.hash_password(payload.password)
+    user.email_verified = True
+    user.verified_at = assist.get_current_date(False)
+    user.verification_token = None
+    # the account is now active and may sign in
+    user.status_id = assist.STATUS_APPROVED
+    user.stage_id = assist.APPROVAL_STAGE_APPROVED
+    user.updated_by = user.email
 
     try:
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"Could not register the laboratory: {e}"
-        )
+        raise HTTPException(status_code=400, detail=f"Could not set your password: {e}")
 
-    return LaboratorySignupResult(
+    return UserSignupResult(
         succeeded=True,
-        message=(
-            "You have successfully registered. You will be informed by email once "
-            "your registration has been reviewed."
-        ),
-        laboratory_id=db_laboratory.id,
-        code=db_laboratory.code,
-        application_count=len(methods),
+        message="Your email is verified and your password is set. You can now sign in.",
+        email=user.email,
     )
-
-

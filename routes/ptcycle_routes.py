@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import get_current_user, CurrentUser
+from typing import Optional
 from models.laboratory_model import LaboratoryDB
 from models.methodsample_model import MethodSampleDB
 from models.ptcycle_model import (
@@ -137,8 +139,16 @@ def _ptcycle_query():
 
 
 @router.get("/list", response_model=List[PTCycleWithDetail])
-async def list_ptcycles(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(_ptcycle_query().order_by(PTCycleDB.effective_date.desc()))
+async def list_ptcycles(
+    db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
+):
+    query = _ptcycle_query().order_by(PTCycleDB.effective_date.desc())
+    # a scheme-team member only sees their own scheme's cycles
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        query = query.where(PTCycleDB.scheme_id == scope)
+    result = await db.execute(query)
     return result.scalars().all()
 
 @router.put("/update/{id}", response_model=PTCycle)

@@ -7,6 +7,7 @@ from typing import List
 
 from database import get_db
 from helpers import assist
+from helpers.auth import require_system_admin, CurrentUser
 from models.user_model import (
     ParamUserEdit,
     User,
@@ -18,6 +19,7 @@ from models.district_model import DistrictDB
 from models.laboratory_model import LaboratoryDB
 from models.province_model import ProvinceDB
 from models.role_model import RoleDB
+from models.scheme_model import SchemeDB
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -49,13 +51,18 @@ EDITABLE_USER_FIELDS = [
     "address_postal",
     "role_id",
     "laboratory_id",
+    "scheme_id",
     "province_id",
     "district_id",
 ]
 
 
 @router.post("/create", response_model=UserWithDetail)
-async def create_user(user: UserSave, db: AsyncSession = Depends(get_db)):
+async def create_user(
+    user: UserSave,
+    db: AsyncSession = Depends(get_db),
+    _admin: CurrentUser = Depends(require_system_admin),
+):
     """Opens an account for a member of staff.
 
     A laboratory normally gets its account when its registration is approved;
@@ -98,7 +105,10 @@ async def create_user(user: UserSave, db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=UserWithDetail)
 async def update_user(
-    id: int, user_update: UserSave, db: AsyncSession = Depends(get_db)
+    id: int,
+    user_update: UserSave,
+    db: AsyncSession = Depends(get_db),
+    _admin: CurrentUser = Depends(require_system_admin),
 ):
     """Changes an account. A password left blank is left alone."""
     result = await db.execute(select(UserDB).where(UserDB.id == id))
@@ -170,6 +180,9 @@ async def get_id(id: int, db: AsyncSession = Depends(get_db)):
     )
     laboratoryItems = result.scalars().all()
 
+    result = await db.execute(select(SchemeDB).order_by(SchemeDB.name))
+    schemeItems = result.scalars().all()
+
     result = await db.execute(select(ProvinceDB).order_by(ProvinceDB.name))
     provinceItems = result.scalars().all()
 
@@ -180,6 +193,7 @@ async def get_id(id: int, db: AsyncSession = Depends(get_db)):
         user=userItem,
         roleList=roleItems,
         laboratoryList=laboratoryItems,
+        schemeList=schemeItems,
         provinceList=provinceItems,
         districtList=districtItems,
     )

@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
-from typing import List
+from typing import List, Optional
 from database import get_db
+from helpers.auth import get_current_user, CurrentUser
 from models.laboratory_model import (
     Laboratory,
     LaboratoryDB,
@@ -163,21 +164,47 @@ def _laboratory_query():
     )
 
 
+def _scope_to_scheme(query, user: Optional[CurrentUser]):
+    """Confine a laboratory query to a scheme-team member's own scheme.
+
+    A laboratory has no scheme of its own, so it is scoped by whether it has
+    applied to the scheme - i.e. it has an application row in that scheme.
+    Administrator and MOH (cross-scheme) are not scoped.
+    """
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        query = query.where(
+            LaboratoryDB.id.in_(
+                select(ApplicationsDB.lab_id).where(
+                    ApplicationsDB.scheme_id == scope
+                )
+            )
+        )
+    return query
+
+
 @router.get("/list", response_model=List[LaboratoryWithDetail])
-async def list_laboratorys(db: AsyncSession = Depends(get_db)):
+async def list_laboratorys(
+    db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
+):
     """Every laboratory and its registration detail.
 
     The flat listing. For the schemes each one takes part in, see
-    /laboratorys/scheme-list.
+    /laboratorys/scheme-list. A scheme-team member sees only labs that applied
+    to their scheme.
     """
-    result = await db.execute(_laboratory_query())
+    result = await db.execute(_scope_to_scheme(_laboratory_query(), user))
     return result.scalars().all()
 
 
 @router.get("/scheme-list", response_model=List[LaboratoryWithSchemes])
-async def list_laboratory_schemes(db: AsyncSession = Depends(get_db)):
+async def list_laboratory_schemes(
+    db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
+):
     """Every laboratory, with the schemes it applied to and how each stands."""
-    result = await db.execute(_laboratory_query())
+    result = await db.execute(_scope_to_scheme(_laboratory_query(), user))
     laboratorys = result.scalars().all()
 
     # one query for the whole page rather than one per laboratory

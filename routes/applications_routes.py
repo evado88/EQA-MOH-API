@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.auth import get_current_user, CurrentUser
 from models.applications_model import Applications, ApplicationsWithDetail, ParamApplicationsEdit, ApplicationsDB
 # approval
 from models.stage_model import Stage
@@ -115,11 +116,13 @@ async def list_applicationss(
         description="Only return applications that still need a decision",
     ),
     db: AsyncSession = Depends(get_db),
+    user: Optional["CurrentUser"] = Depends(get_current_user),
 ):
     """Lists applications, newest first.
 
     An administrator reviewing the queue normally wants `pending=true`; the
-    unfiltered listing is what the full register looks like.
+    unfiltered listing is what the full register looks like. A scheme-team
+    member only ever sees their own scheme's applications.
     """
     query = _application_query()
 
@@ -131,6 +134,11 @@ async def list_applicationss(
 
     if scheme_id is not None:
         query = query.where(ApplicationsDB.scheme_id == scheme_id)
+
+    # a scheme-team member is confined to their scheme regardless of the filter
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        query = query.where(ApplicationsDB.scheme_id == scope)
 
     if pending:
         query = query.where(

@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.role_model import Role, RoleWithDetail, ParamRoleEdit, RoleDB
 # approval
 from models.stage_model import Stage
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/role", tags=["Roles"])
 
 
 @router.post("/create", response_model=Role)
-async def post_role(role: Role, db: AsyncSession = Depends(get_db)):
+async def post_role(role: Role, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = RoleDB(
@@ -46,7 +47,7 @@ async def post_role(role: Role, db: AsyncSession = Depends(get_db)):
 @router.post("/initialize")
 async def initialize(db: AsyncSession = Depends(get_db)):
     
-    itemList = [{'name': 'Administrator'}, {'name': 'Scheme Head'}, {'name': 'Scheme Coordinator'}, {'name': 'Scheme Quality Officers'}, {'name': 'Finance Officers'}, {'name': 'Provincial Biomedical Scientists (PBs)'}, {'name': 'EQA/QMS Focal Point Persons (FPPs)'}, {'name': 'District Laboratory Coordinators '}, {'name': 'Facility Super User'}, {'name': 'Facility Staff'}]
+    itemList = [{'name': 'Administrator'}, {'name': 'Scheme Head'}, {'name': 'Scheme Coordinator'}, {'name': 'Scheme Quality Officers'}, {'name': 'Finance Officers'}, {'name': 'Provincial Biomedical Scientists (PBs)'}, {'name': 'EQA/QMS Focal Point Persons (FPPs)'}, {'name': 'District Laboratory Coordinators '}, {'name': 'Facility Super User'}, {'name': 'Facility Staff'}, {'name': 'Ministry of Health (MOH)'}]
 
     for value in itemList:
         db_item = RoleDB(
@@ -90,7 +91,8 @@ async def list_roles(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Role)
 async def update_role(
-    id: int, role_update: Role, db: AsyncSession = Depends(get_db)
+    id: int, role_update: Role, db: AsyncSession = Depends(get_db),
+    _admin: CurrentUser = Depends(require_system_admin),
 ):
     result = await db.execute(select(RoleDB).where(RoleDB.id == id))
     role = result.scalar_one_or_none()

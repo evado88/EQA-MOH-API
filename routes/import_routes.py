@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from helpers import import_csv
+from helpers.auth import require_system_admin, CurrentUser
 
 router = APIRouter(prefix="/imports", tags=["Imports"])
 
@@ -112,6 +113,7 @@ async def post_import(
         ),
     ),
     db: AsyncSession = Depends(get_db),
+    _admin: CurrentUser = Depends(require_system_admin),
 ):
     """Loads a completed template.
 

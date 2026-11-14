@@ -31,6 +31,9 @@ class ApplicationsDB(Base):
     scheme_id = Column(Integer, ForeignKey("schemes.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     method_id = Column(Integer, ForeignKey("methods.id"), nullable=False)
+    # the lab's per-scheme registration number, e.g. TB-001. Shared by every
+    # method application a lab raises for the same scheme.
+    registration_number = Column(String, nullable=True)
     # approval
     # user - null for an application raised by a lab registering itself
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -100,6 +103,7 @@ class Applications(BaseModel):
         ...,
         description="Method must be provided",
     )
+    registration_number: Optional[str] = None
     # approval
     # user
     user_id: Optional[int] = None
