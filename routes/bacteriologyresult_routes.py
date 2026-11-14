@@ -8,6 +8,7 @@ from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.bacteriologyresult_model import (
     ANTIBIOTIC_SUGGESTIONS,
+    ORGANISM_CATALOGUE,
     AST_GUIDELINE_VALUES,
     AST_INTERPRETATION_LABELS,
     AST_INTERPRETATION_VALUES,
@@ -226,6 +227,8 @@ async def get_bacteriologyresult_options():
         "astInterpretationLabels": AST_INTERPRETATION_LABELS,
         # a suggestion, not a restriction - an agent outside it is accepted
         "antibioticList": ANTIBIOTIC_SUGGESTIONS,
+        # the bacterial identification menu, from the master organism catalogue
+        "organismList": ORGANISM_CATALOGUE,
         "astMaxRows": AST_MAX_ROWS,
         "receiptFieldList": RECEIPT_FIELDS,
         "receiptLabels": RECEIPT_LABELS,
