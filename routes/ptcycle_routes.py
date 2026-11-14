@@ -567,6 +567,97 @@ async def list_ptcycle_extensions(id: int, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
+# result tables that hold a cycle's sample result sheets
+_RESULT_TABLES = [
+    "tb_xpert_ultra_results",
+    "tb_xpert_xdr_results",
+    "hiv_vl_results",
+    "hiv_eid_results",
+    "bacteriology_results",
+]
+
+
+def _progress_status(total: int, entered: int) -> str:
+    if total == 0 or entered == 0:
+        return "not_started"
+    if entered >= total:
+        return "complete"
+    return "in_progress"
+
+
+@router.get("/statistics/{id}")
+async def ptcycle_statistics(id: int, db: AsyncSession = Depends(get_db)):
+    """Quick progress stats for a round: samples entered vs total, overall
+    completion, and a per-lab breakdown - with a status (not_started /
+    in_progress / complete) for colour coding. Used by scheme coordinators and
+    administrators."""
+    ptcycle = (
+        await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
+    ).scalars().first()
+    if not ptcycle:
+        raise HTTPException(status_code=404, detail=f"Unable to find PT Cycle with id '{id}'")
+
+    per_lab = {}  # lab_id -> [total, entered]
+    total = 0
+    entered = 0
+    for table in _RESULT_TABLES:
+        rows = (
+            await db.execute(
+                text(
+                    f"SELECT lab_id, count(*) AS total, "
+                    f"count(*) FILTER (WHERE status_id IN (:sub, :app)) AS entered "
+                    f"FROM {table} WHERE pt_cycle_id = :c GROUP BY lab_id"
+                ),
+                {"c": id, "sub": assist.STATUS_SUBMITTED, "app": assist.STATUS_APPROVED},
+            )
+        ).all()
+        for lab_id, t, e in rows:
+            agg = per_lab.setdefault(lab_id, [0, 0])
+            agg[0] += t
+            agg[1] += e
+            total += t
+            entered += e
+
+    names = {}
+    if per_lab:
+        nrows = (
+            await db.execute(
+                text("SELECT id, name, code FROM laboratorys WHERE id = ANY(:ids)"),
+                {"ids": list(per_lab)},
+            )
+        ).all()
+        names = {i: (n, c) for i, n, c in nrows}
+
+    labs = []
+    for lab_id, (t, e) in per_lab.items():
+        name, code = names.get(lab_id, (f"Lab {lab_id}", None))
+        labs.append(
+            {
+                "lab_id": lab_id,
+                "lab_name": name,
+                "lab_code": code,
+                "total": t,
+                "entered": e,
+                "pending": t - e,
+                "completion_pct": round(e / t * 100) if t else 0,
+                "status": _progress_status(t, e),
+            }
+        )
+    labs.sort(key=lambda x: x["lab_name"] or "")
+
+    return {
+        "pt_cycle_id": id,
+        "total": total,
+        "entered": entered,
+        "pending": total - entered,
+        "completion_pct": round(entered / total * 100) if total else 0,
+        "status": _progress_status(total, entered),
+        "lab_count": len(labs),
+        "labs_complete": sum(1 for l in labs if l["status"] == "complete"),
+        "labs": labs,
+    }
+
+
 @router.get("/documents/{id}", response_model=List[Attachment])
 async def list_ptcycle_documents(id: int, db: AsyncSession = Depends(get_db)):
     """Documents attached to a round (instructions, resources). Uploaded via
