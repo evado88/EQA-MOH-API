@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.district_model import District, DistrictWithDetail, ParamDistrictEdit, DistrictDB
 # approval
 from models.stage_model import Stage
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/districts", tags=["Districts"])
 
 
 @router.post("/create", response_model=District)
-async def post_district(district: District, db: AsyncSession = Depends(get_db)):
+async def post_district(district: District, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = DistrictDB(
@@ -94,7 +95,7 @@ async def list_districts(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=District)
 async def update_district(
-    id: int, district_update: District, db: AsyncSession = Depends(get_db)
+    id: int, district_update: District, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(DistrictDB).where(DistrictDB.id == id))
     district = result.scalar_one_or_none()

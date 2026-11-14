@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.provider_model import Provider, ProviderWithDetail, ParamProviderEdit, ProviderDB
 # approval
 from models.stage_model import Stage
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/providers", tags=["Providers"])
 
 
 @router.post("/create", response_model=Provider)
-async def post_provider(provider: Provider, db: AsyncSession = Depends(get_db)):
+async def post_provider(provider: Provider, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = ProviderDB(
@@ -90,7 +91,7 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Provider)
 async def update_provider(
-    id: int, provider_update: Provider, db: AsyncSession = Depends(get_db)
+    id: int, provider_update: Provider, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(ProviderDB).where(ProviderDB.id == id))
     provider = result.scalar_one_or_none()

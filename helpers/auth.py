@@ -12,10 +12,17 @@ as before. Endpoints that must be protected depend on `require_user`,
 """
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 
 from helpers import assist
+
+# Registering a bearer scheme is what makes Swagger show the padlock and the
+# "Authorize" button, and send the token on "Try it out". auto_error=False keeps
+# it optional at the transport layer, so endpoints that only *scope* by the
+# caller still work anonymously; the required guards below raise 401 themselves.
+bearer_scheme = HTTPBearer(auto_error=False, description="Paste the access_token from /auth/login")
 
 
 class CurrentUser:
@@ -38,18 +45,14 @@ def _decode(token: str) -> dict:
 
 
 async def get_current_user(
-    authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> Optional[CurrentUser]:
     """The caller if a valid bearer token is present, otherwise None."""
-    if not authorization:
-        return None
-
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    if not credentials or not credentials.credentials:
         return None
 
     try:
-        payload = _decode(token.strip())
+        payload = _decode(credentials.credentials.strip())
     except JWTError:
         return None
 

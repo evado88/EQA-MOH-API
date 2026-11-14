@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.auth import get_current_user, CurrentUser
 from models.bacteriologyresult_model import (
     ANTIBIOTIC_SUGGESTIONS,
     AST_GUIDELINE_VALUES,
@@ -245,8 +246,14 @@ async def list_bacteriologyresults(
         default=False, description="Only return results that still need a decision"
     ),
     db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
 ):
     query = _result_query()
+
+    # a scheme-team member only sees their own scheme's results
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        query = query.where(BacteriologyResultDB.scheme_id == scope)
 
     if pt_cycle_id is not None:
         query = query.where(BacteriologyResultDB.pt_cycle_id == pt_cycle_id)

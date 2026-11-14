@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.scheme_model import Scheme, SchemeWithDetail, ParamSchemeEdit, SchemeDB
 # approval
 from models.stage_model import Stage
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/schemes", tags=["Schemes"])
 
 
 @router.post("/create", response_model=Scheme)
-async def post_scheme(scheme: Scheme, db: AsyncSession = Depends(get_db)):
+async def post_scheme(scheme: Scheme, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = SchemeDB(
@@ -93,7 +94,7 @@ async def list_schemes(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Scheme)
 async def update_scheme(
-    id: int, scheme_update: Scheme, db: AsyncSession = Depends(get_db)
+    id: int, scheme_update: Scheme, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(SchemeDB).where(SchemeDB.id == id))
     scheme = result.scalar_one_or_none()

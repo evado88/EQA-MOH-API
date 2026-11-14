@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.auth import get_current_user, CurrentUser
 from models.enrollment_model import (
     Enrollment,
     EnrollmentApplyResult,
@@ -123,8 +124,14 @@ async def list_enrollments(
         default=False, description="Only return enrolments that still need a decision"
     ),
     db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
 ):
     query = _enrollment_query()
+
+    # a scheme-team member only sees their own scheme's enrolments
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        query = query.where(EnrollmentDB.scheme_id == scope)
 
     if pt_cycle_id is not None:
         query = query.where(EnrollmentDB.pt_cycle_id == pt_cycle_id)

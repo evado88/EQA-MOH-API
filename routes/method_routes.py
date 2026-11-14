@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.method_model import Method, MethodWithDetail, ParamMethodEdit, MethodDB
 # approval
 from models.stage_model import Stage
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/methods", tags=["Methods"])
 
 
 @router.post("/create", response_model=Method)
-async def post_method(method: Method, db: AsyncSession = Depends(get_db)):
+async def post_method(method: Method, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = MethodDB(
@@ -96,7 +97,7 @@ async def list_methods(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Method)
 async def update_method(
-    id: int, method_update: Method, db: AsyncSession = Depends(get_db)
+    id: int, method_update: Method, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(MethodDB).where(MethodDB.id == id))
     method = result.scalar_one_or_none()

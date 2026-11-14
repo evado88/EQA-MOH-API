@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from database import get_db
 from helpers import assist
+from helpers.auth import get_current_user, CurrentUser
 from models.evaluation_model import (
     PTEnrollmentPerformance,
     PTEnrollmentPerformanceDB,
@@ -112,6 +113,7 @@ async def read_report_view(
     enrollment_id: Optional[int] = Query(default=None),
     limit: int = Query(default=500, le=5000),
     db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
 ):
     """Reads one of the reporting views.
 
@@ -154,6 +156,13 @@ async def read_report_view(
         if enrollment_id is not None:
             clauses.append("enrollment_id = :enrollment_id")
             params["enrollment_id"] = enrollment_id
+
+    # a scheme-team member is confined to their own scheme, whatever they asked
+    scope = assist.scheme_scope_for(user) if user else None
+    if scope is not None:
+        params["scheme_id"] = scope
+        if "scheme_id = :scheme_id" not in clauses:
+            clauses.append("scheme_id = :scheme_id")
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 

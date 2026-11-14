@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.labtype_model import LabType, LabTypeWithDetail, ParamLabTypeEdit, LabTypeDB
 # approval
 from models.stage_model import Stage
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/lab-types", tags=["LabTypes"])
 
 
 @router.post("/create", response_model=LabType)
-async def post_labtype(labtype: LabType, db: AsyncSession = Depends(get_db)):
+async def post_labtype(labtype: LabType, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = LabTypeDB(
@@ -90,7 +91,7 @@ async def list_labtypes(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=LabType)
 async def update_labtype(
-    id: int, labtype_update: LabType, db: AsyncSession = Depends(get_db)
+    id: int, labtype_update: LabType, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(LabTypeDB).where(LabTypeDB.id == id))
     labtype = result.scalar_one_or_none()

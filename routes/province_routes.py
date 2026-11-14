@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.province_model import Province, ProvinceWithDetail, ParamProvinceEdit, ProvinceDB
 # approval
 from models.stage_model import Stage
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/provinces", tags=["Provinces"])
 
 
 @router.post("/create", response_model=Province)
-async def post_province(province: Province, db: AsyncSession = Depends(get_db)):
+async def post_province(province: Province, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = ProvinceDB(
@@ -92,7 +93,7 @@ async def list_provinces(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Province)
 async def update_province(
-    id: int, province_update: Province, db: AsyncSession = Depends(get_db)
+    id: int, province_update: Province, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(ProvinceDB).where(ProvinceDB.id == id))
     province = result.scalar_one_or_none()

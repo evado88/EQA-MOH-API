@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.methodsample_model import MethodSample, MethodSampleWithDetail, ParamMethodSampleEdit, MethodSampleDB
 # approval
 from models.stage_model import Stage
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/method-samples", tags=["MethodSamples"])
 
 
 @router.post("/create", response_model=MethodSample)
-async def post_methodsample(methodsample: MethodSample, db: AsyncSession = Depends(get_db)):
+async def post_methodsample(methodsample: MethodSample, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = MethodSampleDB(
@@ -99,7 +100,7 @@ async def list_methodsamples(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=MethodSample)
 async def update_methodsample(
-    id: int, methodsample_update: MethodSample, db: AsyncSession = Depends(get_db)
+    id: int, methodsample_update: MethodSample, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(MethodSampleDB).where(MethodSampleDB.id == id))
     methodsample = result.scalar_one_or_none()

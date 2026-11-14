@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
 from database import get_db
+from helpers.auth import require_system_admin, CurrentUser
 from models.service_model import Service, ServiceWithDetail, ParamServiceEdit, ServiceDB
 # approval
 from models.stage_model import Stage
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/services", tags=["Services"])
 
 
 @router.post("/create", response_model=Service)
-async def post_service(service: Service, db: AsyncSession = Depends(get_db)):
+async def post_service(service: Service, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)):
 
 
     db_context = ServiceDB(
@@ -93,7 +94,7 @@ async def list_services(db: AsyncSession = Depends(get_db)):
 
 @router.put("/update/{id}", response_model=Service)
 async def update_service(
-    id: int, service_update: Service, db: AsyncSession = Depends(get_db)
+    id: int, service_update: Service, db: AsyncSession = Depends(get_db), _admin: CurrentUser = Depends(require_system_admin)
 ):
     result = await db.execute(select(ServiceDB).where(ServiceDB.id == id))
     service = result.scalar_one_or_none()
