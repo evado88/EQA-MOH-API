@@ -31,7 +31,6 @@ VIRAL_LOAD_MAX = 10.0
 # result row so each row stays independently reviewable, the way the Ultra and
 # XDR sheets are.
 PANEL_FIELDS = [
-    "date_panel_received",
     "date_tested",
     "detection_assay",
     "extraction_assay",
@@ -41,7 +40,6 @@ PANEL_FIELDS = [
 ]
 
 PANEL_LABELS = {
-    "date_panel_received": "Date PT Panel Received",
     "date_tested": "Date PT Panel Tested",
     "detection_assay": "Detection Assay",
     "extraction_assay": "Extraction Assay",
@@ -52,7 +50,6 @@ PANEL_LABELS = {
 
 # what a submitted, tested result has to carry before a reviewer can grade it
 REQUIRED_ON_SUBMIT = [
-    "date_panel_received",
     "date_tested",
     "detection_assay",
     "extraction_assay",
@@ -100,7 +97,6 @@ class HIVVLResultDB(Base):
     method_sample_id = Column(Integer, ForeignKey("method_samples.id"), nullable=False)
 
     # panel header
-    date_panel_received = Column(Date, nullable=True)
     date_tested = Column(Date, nullable=True)
     detection_assay = Column(String, nullable=True)
     extraction_assay = Column(String, nullable=True)
@@ -204,9 +200,6 @@ class HIVVLResult(BaseModel):
 
     # panel header - optional on the model so a lab can save a partly captured
     # panel; the rules below are what make a result submittable
-    date_panel_received: Optional[date] = Field(
-        default=None, description="The date the PT panel arrived at the laboratory"
-    )
     date_tested: Optional[date] = Field(
         default=None, description="The date the PT panel was tested"
     )
@@ -352,10 +345,6 @@ class HIVVLResult(BaseModel):
                     "Please give the reason the sample could not be tested"
                 )
 
-            if not values.get("date_panel_received"):
-                raise ValueError(
-                    f"The {PANEL_LABELS['date_panel_received']} must be provided"
-                )
 
         return values
 

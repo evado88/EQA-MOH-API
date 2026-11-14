@@ -752,7 +752,6 @@ async def capture_eid_results(c, cycle_id, users, labs, received_on, tested_on,
                 "enrollment", "ptcycle", "method", "methodsample")}
             body.update(
                 user_id=users[email],
-                date_panel_received=received_on.isoformat(),
                 date_tested=tested_on.isoformat() if reported == "Yes" else None,
                 detection_assay=detection if reported == "Yes" else None,
                 extraction_assay=extraction if reported == "Yes" else None,
@@ -853,7 +852,6 @@ async def capture_vl_results(c, cycle_id, users, labs, received_on, tested_on,
 
             body.update(
                 user_id=users[email],
-                date_panel_received=received_on.isoformat(),
                 date_tested=tested_on.isoformat() if tested else None,
                 detection_assay=detection if tested else None,
                 extraction_assay=extraction if tested else None,

@@ -412,8 +412,6 @@ TB_XPERT_XDR_SAMPLES = [
 
 # ---------- HIV-1 Viral Load, form TF-009 ----------
 HIV_VL_COLUMNS = [
-    _field("date_panel_received", "Date PT Panel Received", DATE,
-           "Required once submitted"),
     _field("date_tested", "Date PT Panel Tested", DATE,
            "Required once submitted when a result was reported"),
     _field("detection_assay", "Detection Assay", TEXT, "Required once submitted"),
@@ -437,7 +435,7 @@ HIV_VL_SAMPLES = [
         "pt_cycle_code": "VL-2026-A",
         "lab_code": "REG0005", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "Migrated from the VL-2026-A register",
-        "date_panel_received": "2026-04-02", "date_tested": "2026-04-08",
+        "date_tested": "2026-04-08",
         "detection_assay": "Abbott RealTime HIV-1",
         "extraction_assay": "Abbott m2000sp",
         "assay_kit_lot_number": "LOT-44219", "assay_kit_expiry_date": "2026-11-30",
@@ -452,7 +450,7 @@ HIV_VL_SAMPLES = [
         "pt_cycle_code": "VL-2026-A",
         "lab_code": "REG0005", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "",
-        "date_panel_received": "2026-04-02", "date_tested": "2026-04-08",
+        "date_tested": "2026-04-08",
         "detection_assay": "Abbott RealTime HIV-1",
         "extraction_assay": "Abbott m2000sp",
         "assay_kit_lot_number": "LOT-44219", "assay_kit_expiry_date": "2026-11-30",
@@ -467,7 +465,7 @@ HIV_VL_SAMPLES = [
         "pt_cycle_code": "VL-2026-A",
         "lab_code": "REG0005", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "",
-        "date_panel_received": "2026-04-02", "date_tested": "",
+        "date_tested": "",
         "detection_assay": "", "extraction_assay": "",
         "assay_kit_lot_number": "", "assay_kit_expiry_date": "",
         "assay_serial_number": "",
@@ -480,8 +478,6 @@ HIV_VL_SAMPLES = [
 
 # ---------- HIV-1 EID, form TF-012 ----------
 HIV_EID_COLUMNS = [
-    _field("date_panel_received", "Date PT Panel Received", DATE,
-           "Required once submitted"),
     _field("date_tested", "Date PT Panel Tested", DATE,
            "Required once submitted when a result was reported"),
     _field("detection_assay", "Detection Assay", TEXT, "Required once submitted"),
@@ -505,7 +501,7 @@ HIV_EID_SAMPLES = [
         "method": "Cobas 4800", "sample": "2026-01", "pt_cycle_code": "EID-2026-A",
         "lab_code": "REG0009", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "Migrated from the EID-2026-A register",
-        "date_panel_received": "2026-05-04", "date_tested": "2026-05-11",
+        "date_tested": "2026-05-11",
         "detection_assay": "Roche Cobas 4800 HIV-1 Qual",
         "extraction_assay": "Cobas x480",
         "assay_serial_number": "C4800-20918",
@@ -519,7 +515,7 @@ HIV_EID_SAMPLES = [
         "method": "Cobas 4800", "sample": "2026-02", "pt_cycle_code": "EID-2026-A",
         "lab_code": "REG0009", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "",
-        "date_panel_received": "2026-05-04", "date_tested": "2026-05-11",
+        "date_tested": "2026-05-11",
         "detection_assay": "Roche Cobas 4800 HIV-1 Qual",
         "extraction_assay": "Cobas x480",
         "assay_serial_number": "C4800-20918",
@@ -535,7 +531,7 @@ HIV_EID_SAMPLES = [
         "pt_cycle_code": "EID-2026-A",
         "lab_code": "REG0009", "lab_email": "", "captured_by": "",
         "status": "Approved", "description": "",
-        "date_panel_received": "2026-05-04", "date_tested": "2026-05-11",
+        "date_tested": "2026-05-11",
         "detection_assay": "Roche Cobas 4800 HIV-1 Qual",
         "extraction_assay": "Cobas x480",
         "assay_serial_number": "C4800-20918",
@@ -1182,7 +1178,7 @@ async def _import_result_row(db, spec, lookups, values, importer, counts):
 
     enrollment, opened = await _enrollment_for(
         db, lookups, cycle, laboratory, method, service, user,
-        values.get("date_panel_received") or values.get("date_tested"),
+        values.get("date_tested"),
         importer.email,
     )
     if opened:

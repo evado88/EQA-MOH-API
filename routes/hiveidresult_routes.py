@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.receipts import receipt_exists
 from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.hiveidresult_model import (
@@ -52,7 +53,6 @@ async def post_hiveidresult(hiveidresult: HIVEIDResult, db: AsyncSession = Depen
         pt_cycle_id=hiveidresult.pt_cycle_id,
         method_id=hiveidresult.method_id,
         method_sample_id=hiveidresult.method_sample_id,
-        date_panel_received=hiveidresult.date_panel_received,
         date_tested=hiveidresult.date_tested,
         detection_assay=hiveidresult.detection_assay,
         extraction_assay=hiveidresult.extraction_assay,
@@ -286,12 +286,13 @@ async def update_hiveidresult(
             ),
         )
 
-    if not hiveidresult.enrollment.samples_received_at:
+    # per-sample receipt details must be recorded before entering results
+    if not await receipt_exists(db, hiveidresult.pt_cycle_id, hiveidresult.lab_id, hiveidresult.method_sample_id):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Please confirm you have received the samples for this enrolment "
-                "before capturing results"
+                "Please record this sample's receipt details (date received, "
+                "condition and temperature) before entering results for it"
             ),
         )
 

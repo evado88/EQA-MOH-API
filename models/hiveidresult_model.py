@@ -32,7 +32,6 @@ HIV_RESULT_VALUES = [HIV_RESULT_DETECTED, HIV_RESULT_NOT_DETECTED]
 # the panel header the lab fills in once per shipment. EID asks for fewer
 # details than the viral load form - there is no kit lot or expiry date.
 PANEL_FIELDS = [
-    "date_panel_received",
     "date_tested",
     "detection_assay",
     "extraction_assay",
@@ -40,7 +39,6 @@ PANEL_FIELDS = [
 ]
 
 PANEL_LABELS = {
-    "date_panel_received": "Date PT Panel Received",
     "date_tested": "Date PT Panel Tested",
     "detection_assay": "Detection Assay",
     "extraction_assay": "Extraction Assay",
@@ -49,7 +47,6 @@ PANEL_LABELS = {
 
 # what a submitted, tested result has to carry before it can be graded
 REQUIRED_ON_SUBMIT = [
-    "date_panel_received",
     "date_tested",
     "detection_assay",
     "extraction_assay",
@@ -102,7 +99,6 @@ class HIVEIDResultDB(Base):
     method_sample_id = Column(Integer, ForeignKey("method_samples.id"), nullable=False)
 
     # panel header
-    date_panel_received = Column(Date, nullable=True)
     date_tested = Column(Date, nullable=True)
     detection_assay = Column(String, nullable=True)
     extraction_assay = Column(String, nullable=True)
@@ -185,9 +181,6 @@ class HIVEIDResult(BaseModel):
 
     # panel header - optional on the model so a lab can save a partly captured
     # panel; the rules below are what make a result submittable
-    date_panel_received: Optional[date] = Field(
-        default=None, description="The date the PT panel arrived at the laboratory"
-    )
     date_tested: Optional[date] = Field(
         default=None, description="The date the PT panel was tested"
     )
@@ -342,10 +335,6 @@ class HIVEIDResult(BaseModel):
                     "Please give the reason the sample could not be tested"
                 )
 
-            if not values.get("date_panel_received"):
-                raise ValueError(
-                    f"The {PANEL_LABELS['date_panel_received']} must be provided"
-                )
 
         return values
 

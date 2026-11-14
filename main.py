@@ -12,6 +12,7 @@ from routes import user_routes
 from routes import stage_routes
 from routes import status_routes
 from routes import audit_routes
+from routes import attachment_routes
 from routes import province_routes
 from routes import district_routes
 from routes import ptcyclestatus_routes
@@ -37,6 +38,8 @@ from routes import dashboard_routes
 from routes import facility_routes
 from routes import registration_routes
 from routes import result_submission_routes
+from routes import samplereceipt_routes
+from routes import result_navigation_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -75,6 +78,7 @@ app.include_router(user_routes.router)
 app.include_router(stage_routes.router)
 app.include_router(status_routes.router)
 app.include_router(audit_routes.router)
+app.include_router(attachment_routes.router)
 app.include_router(province_routes.router)
 app.include_router(district_routes.router)
 app.include_router(ptcyclestatus_routes.router)
@@ -100,6 +104,8 @@ app.include_router(dashboard_routes.router)
 app.include_router(facility_routes.router)
 app.include_router(registration_routes.router)
 app.include_router(result_submission_routes.router)
+app.include_router(samplereceipt_routes.router)
+app.include_router(result_navigation_routes.router)
 
 
 # create tables at startup

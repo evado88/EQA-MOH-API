@@ -373,19 +373,8 @@ class TBXpertUltraResult(BaseModel):
         if not values.get("xpert_module_number"):
             raise ValueError("The Xpert Module Number must be provided")
 
-        # the Ct values are read off the instrument print out for every
-        # successful test, so they are only expected for an interpretable result
-        if interpretable == "Yes":
-            missing = [
-                CT_VALUE_LABELS[name]
-                for name in CT_VALUE_FIELDS
-                if values.get(name) is None
-            ]
-            if missing:
-                raise ValueError(
-                    "The cycle threshold (Ct) values must be provided for an "
-                    f"interpretable result. Missing: {', '.join(missing)}"
-                )
+        # cycle threshold (Ct) values and other ancillary detection values are
+        # optional - only the primary result fields are required on submit
 
         return values
 

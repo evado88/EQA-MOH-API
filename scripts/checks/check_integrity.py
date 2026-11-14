@@ -104,8 +104,7 @@ CHECKS += [
         where viral_load_log10 < 0 or viral_load_log10 > 10"""),
     ("vl: submitted without the panel details",
      """select id from hiv_vl_results where status_id in (2,4)
-        and result_reported='Yes' and (date_panel_received is null
-          or date_tested is null or detection_assay is null
+        and result_reported='Yes' and (date_tested is null or detection_assay is null
           or extraction_assay is null)"""),
     ("vl: reported value not Yes or No",
      """select id from hiv_vl_results where result_reported is not null
@@ -125,8 +124,7 @@ CHECKS += [
         and result_reported='No' and not_tested_reason is null"""),
     ("eid: submitted without the panel details",
      """select id from hiv_eid_results where status_id in (2,4)
-        and result_reported='Yes' and (date_panel_received is null
-          or date_tested is null or detection_assay is null
+        and result_reported='Yes' and (date_tested is null or detection_assay is null
           or extraction_assay is null)"""),
     ("eid: optional value out of range",
      """select id from hiv_eid_results where

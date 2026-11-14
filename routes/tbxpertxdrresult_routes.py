@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.receipts import receipt_exists
 from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.tbxpertxdrresult_model import (
@@ -297,12 +298,13 @@ async def update_tbxpertxdrresult(
             ),
         )
 
-    if not tbxpertxdrresult.enrollment.samples_received_at:
+    # per-sample receipt details must be recorded before entering results
+    if not await receipt_exists(db, tbxpertxdrresult.pt_cycle_id, tbxpertxdrresult.lab_id, tbxpertxdrresult.method_sample_id):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Please confirm you have received the samples for this enrolment "
-                "before capturing results"
+                "Please record this sample's receipt details (date received, "
+                "condition and temperature) before entering results for it"
             ),
         )
 

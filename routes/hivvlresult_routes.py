@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.receipts import receipt_exists
 from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.hivvlresult_model import (
@@ -51,7 +52,6 @@ async def post_hivvlresult(hivvlresult: HIVVLResult, db: AsyncSession = Depends(
         pt_cycle_id=hivvlresult.pt_cycle_id,
         method_id=hivvlresult.method_id,
         method_sample_id=hivvlresult.method_sample_id,
-        date_panel_received=hivvlresult.date_panel_received,
         date_tested=hivvlresult.date_tested,
         detection_assay=hivvlresult.detection_assay,
         extraction_assay=hivvlresult.extraction_assay,
@@ -282,12 +282,13 @@ async def update_hivvlresult(
             ),
         )
 
-    if not hivvlresult.enrollment.samples_received_at:
+    # per-sample receipt details must be recorded before entering results
+    if not await receipt_exists(db, hivvlresult.pt_cycle_id, hivvlresult.lab_id, hivvlresult.method_sample_id):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Please confirm you have received the samples for this enrolment "
-                "before capturing results"
+                "Please record this sample's receipt details (date received, "
+                "condition and temperature) before entering results for it"
             ),
         )
 
