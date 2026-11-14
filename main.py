@@ -25,6 +25,8 @@ from routes import tbxpertultraresult_routes
 from routes import tbxpertxdrresult_routes
 from routes import hivvlresult_routes
 from routes import hiveidresult_routes
+from routes import bacteriologyresult_routes
+from routes import announcement_routes
 from routes import evaluation_routes
 from routes import report_routes
 from routes import enrollment_routes
@@ -83,6 +85,8 @@ app.include_router(tbxpertultraresult_routes.router)
 app.include_router(tbxpertxdrresult_routes.router)
 app.include_router(hivvlresult_routes.router)
 app.include_router(hiveidresult_routes.router)
+app.include_router(bacteriologyresult_routes.router)
+app.include_router(announcement_routes.router)
 app.include_router(evaluation_routes.router)
 app.include_router(report_routes.router)
 app.include_router(enrollment_routes.router)

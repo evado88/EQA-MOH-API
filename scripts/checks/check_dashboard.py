@@ -56,6 +56,7 @@ RESULT_TABLES = [
     "tb_xpert_xdr_results",
     "hiv_vl_results",
     "hiv_eid_results",
+    "bacteriology_results",
 ]
 
 

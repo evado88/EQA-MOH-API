@@ -86,6 +86,8 @@ class UserDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="user")
     hivvlresult = relationship("HIVVLResultDB", back_populates="user")
     hiveidresult = relationship("HIVEIDResultDB", back_populates="user")
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="user")
+    announcement = relationship("AnnouncementDB", back_populates="user")
     enrollment = relationship("EnrollmentDB", back_populates="user")
     applications = relationship("ApplicationsDB", back_populates="user")
     # the roles this user created, following the same naming as laboratories /

@@ -37,6 +37,8 @@ class StageDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="stage")
     hivvlresult = relationship("HIVVLResultDB", back_populates="stage")
     hiveidresult = relationship("HIVEIDResultDB", back_populates="stage")
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="stage")
+    announcement = relationship("AnnouncementDB", back_populates="stage")
     enrollment = relationship("EnrollmentDB", back_populates="stage")
     applications = relationship("ApplicationsDB", back_populates="stage")
     role = relationship("RoleDB", back_populates="stage")

@@ -110,21 +110,36 @@ class ScoringPolicy:
     Schemes do not agree on this. The EID scheme awards 20 marks a sample and
     demands all of them; the others are scored out of 2 with a lower bar. So
     the policy belongs to the form, not to the system.
+
+    Nor do all schemes weight every question the same. Bacteriology is worth
+    3 marks for the Gram stain reaction but 10 for naming the organism, so a
+    policy may carry a mark per attribute; one that does not weights them all
+    alike, as before.
     """
 
-    def __init__(self, acceptable, warning, unacceptable, threshold, source):
+    def __init__(self, acceptable, warning, unacceptable, threshold, source,
+                 attribute_scores=None):
         self.acceptable = acceptable
         self.warning = warning
         self.unacceptable = unacceptable
         self.max_per_attribute = max(acceptable, warning, unacceptable)
+        # marks per graded field, where the scheme weights them differently.
+        # An attribute this does not mention falls back to `acceptable`, so a
+        # field the scheme never put a mark against scores nothing and is left
+        # out of the total rather than being invented a weight.
+        self.attribute_scores = attribute_scores or {}
         # the proportion of the available marks a lab must reach
         self.threshold = threshold
         # where these numbers come from, so they can be checked
         self.source = source
 
-    def score_for(self, grade):
+    def max_for(self, attribute=None):
+        """The marks a correct answer to this field is worth"""
+        return self.attribute_scores.get(attribute, self.acceptable)
+
+    def score_for(self, grade, attribute=None):
         if grade == GRADE_ACCEPTABLE:
-            return self.acceptable
+            return self.max_for(attribute)
         if grade == GRADE_WARNING:
             return self.warning
         return self.unacceptable
@@ -144,9 +159,33 @@ EID_SCORING_POLICY = ScoringPolicy(
     source="TF-006 performance criteria",
 )
 
+# Stated in scheme protocol TP-NHRTI-BACT-001 section 17.1. Bacteriology is
+# the one scheme that pays different marks for different questions, and the
+# marks fall out of a survey of five samples:
+#
+#     Gram stain reaction       3 x 5 =  15
+#     Bacterial morphology      3 x 5 =  15
+#     Bacterial identification 10 x 5 =  50
+#     AST (tested discs)       20 x 1 =  20
+#                                       ---
+#                                       100
+#
+# Section 17.2 puts the bar at the full 100%.
+BACTERIOLOGY_SCORING_POLICY = ScoringPolicy(
+    acceptable=0, warning=0, unacceptable=0, threshold=1.00,
+    source="TP-NHRTI-BACT-001 section 17.1",
+    attribute_scores={
+        "gram_stain_reaction": 3,
+        "gram_morphology": 3,
+        "organism_identified": 10,
+        "ast_result": 20,
+    },
+)
+
 # keyed by the result form; anything not listed uses the default
 SCORING_POLICIES = {
     "hiv_eid": EID_SCORING_POLICY,
+    "bacteriology": BACTERIOLOGY_SCORING_POLICY,
 }
 
 
@@ -169,7 +208,7 @@ NIQR_FACTOR = 0.7413
 MIN_PARTICIPANTS_FOR_CONSENSUS = 3
 
 
-def grade_for_z_score(z_score, policy=None):
+def grade_for_z_score(z_score, policy=None, attribute=None):
     """Turns a z-score into the grade and marks on form TF-007"""
     policy = policy or DEFAULT_SCORING_POLICY
 
@@ -185,10 +224,10 @@ def grade_for_z_score(z_score, policy=None):
     else:
         grade = GRADE_UNACCEPTABLE
 
-    return grade, policy.score_for(grade)
+    return grade, policy.score_for(grade, attribute)
 
 
-def grade_for_agreement(reported, assigned, policy=None):
+def grade_for_agreement(reported, assigned, policy=None, attribute=None):
     """Grades a categorical result by whether it matches the assigned value"""
     policy = policy or DEFAULT_SCORING_POLICY
 
@@ -196,7 +235,7 @@ def grade_for_agreement(reported, assigned, policy=None):
         return GRADE_NOT_EVALUATED, policy.unacceptable
 
     if reported.strip().upper() == assigned.strip().upper():
-        return GRADE_ACCEPTABLE, policy.acceptable
+        return GRADE_ACCEPTABLE, policy.max_for(attribute)
 
     return GRADE_UNACCEPTABLE, policy.unacceptable
 

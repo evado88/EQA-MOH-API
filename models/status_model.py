@@ -37,6 +37,8 @@ class StatusDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="status")
     hivvlresult = relationship("HIVVLResultDB", back_populates="status")
     hiveidresult = relationship("HIVEIDResultDB", back_populates="status")
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="status")
+    announcement = relationship("AnnouncementDB", back_populates="status")
     enrollment = relationship("EnrollmentDB", back_populates="status")
     applications = relationship("ApplicationsDB", back_populates="status")
     role = relationship("RoleDB", back_populates="status")

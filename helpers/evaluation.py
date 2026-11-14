@@ -8,6 +8,7 @@ import statistics
 from collections import Counter, defaultdict
 
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
 from helpers import assist
 from models.evaluation_model import (
@@ -17,6 +18,7 @@ from models.evaluation_model import (
 )
 from models.laboratory_model import LaboratoryDB
 from models.method_model import (
+    RESULT_FORM_BACTERIOLOGY,
     RESULT_FORM_HIV_EID,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_TB_XPERT_ULTRA,
@@ -28,6 +30,10 @@ from models.tbxpertultraresult_model import TBXpertUltraResultDB
 from models.tbxpertxdrresult_model import TBXpertXDRResultDB
 from models.hivvlresult_model import HIVVLResultDB
 from models.hiveidresult_model import HIVEIDResultDB
+from models.bacteriologyresult_model import (
+    BacteriologyResultDB,
+    ast_interpretations,
+)
 
 
 # which fields on each form are graded, and how
@@ -52,6 +58,15 @@ FORM_ATTRIBUTES = {
     RESULT_FORM_HIV_EID: [
         ("hiv_result", "Your Result", QUAL),
     ],
+    # the marks are in assist.BACTERIOLOGY_SCORING_POLICY: 3, 3, 10 and 20.
+    # 'ast_result' is the worksheet's AST table reduced to one answer - see
+    # BacteriologyResultDB.ast_result
+    RESULT_FORM_BACTERIOLOGY: [
+        ("gram_stain_reaction", "Gram Stain Reaction", QUAL),
+        ("gram_morphology", "Bacterial Morphology", QUAL),
+        ("organism_identified", "Bacterial Identification", QUAL),
+        ("ast_result", "AST Results", QUAL),
+    ],
 }
 
 FORM_MODELS = {
@@ -59,6 +74,16 @@ FORM_MODELS = {
     RESULT_FORM_TB_XPERT_XDR: TBXpertXDRResultDB,
     RESULT_FORM_HIV_VL: HIVVLResultDB,
     RESULT_FORM_HIV_EID: HIVEIDResultDB,
+    RESULT_FORM_BACTERIOLOGY: BacteriologyResultDB,
+}
+
+# the worksheet's AST table, graded as one answer rather than one per agent
+AST_ATTRIBUTE = "ast_result"
+
+# a form whose graded fields are not all columns has to be loaded with the rest
+# of itself; bacteriology grades its AST table
+FORM_EAGER_LOADS = {
+    RESULT_FORM_BACTERIOLOGY: (BacteriologyResultDB.astresult,),
 }
 
 # a result only counts once the lab has formally submitted it. A draft is not
@@ -72,15 +97,48 @@ SUBMITTED_STATUSES = (
 
 def _did_report(form, row):
     """Whether the lab actually produced a result for this sample"""
+    if form == RESULT_FORM_BACTERIOLOGY:
+        return not row.testing_not_done
     if form in (RESULT_FORM_HIV_VL, RESULT_FORM_HIV_EID):
         return row.result_reported == "Yes"
     return row.result_interpretable == "Yes"
 
 
 def _not_reported_reason(form, row):
+    if form == RESULT_FORM_BACTERIOLOGY:
+        return row.testing_not_done_reason or "Testing not done on this specimen"
     if form in (RESULT_FORM_HIV_VL, RESULT_FORM_HIV_EID):
         return row.not_tested_reason or "No result reported"
     return row.uninterpretable_result or "Result not interpretable"
+
+
+def _grade_ast(reported, assigned, policy):
+    """Grades the AST section against the discs the participant actually tested.
+
+    Protocol TP-NHRTI-BACT-001 scores 'Tested AST discs', so a participant is
+    judged on the agents it reported that the assigned value has an answer for,
+    not on agents it was never asked about and not on agents it chose to add.
+    All of them have to agree: the scheme's bar is 100%.
+    """
+    mine = ast_interpretations(reported)
+    theirs = ast_interpretations(assigned)
+
+    shared = [agent for agent in mine if agent in theirs]
+
+    if not shared:
+        return assist.GRADE_NOT_EVALUATED, policy.unacceptable, None
+
+    agreed = [agent for agent in shared if mine[agent] == theirs[agent]]
+
+    if len(agreed) == len(shared):
+        return assist.GRADE_ACCEPTABLE, policy.max_for("ast_result"), None
+
+    disagreed = sorted(set(shared) - set(agreed))
+    return (
+        assist.GRADE_UNACCEPTABLE,
+        policy.unacceptable,
+        "Disagreed on " + ", ".join(disagreed),
+    )
 
 
 def _robust_statistics(values):
@@ -115,12 +173,15 @@ async def _load_results(db, ptcycle):
     loaded = []
 
     for form, model in FORM_MODELS.items():
-        result = await db.execute(
-            select(model).where(
-                model.pt_cycle_id == ptcycle.id,
-                model.status_id.in_(SUBMITTED_STATUSES),
-            )
+        query = select(model).where(
+            model.pt_cycle_id == ptcycle.id,
+            model.status_id.in_(SUBMITTED_STATUSES),
         )
+
+        for relationship in FORM_EAGER_LOADS.get(form, ()):
+            query = query.options(selectinload(relationship))
+
+        result = await db.execute(query)
         for row in result.scalars().all():
             loaded.append((form, row))
 
@@ -260,6 +321,13 @@ async def evaluate_cycle(db, ptcycle, user):
             if predefined:
                 stat.assigned_value_text = predefined
                 stat.assigned_value_source = assist.ASSIGNED_VALUE_PREDEFINED
+            elif attribute == AST_ATTRIBUTE:
+                # An AST answer is a whole table of agents, and no two
+                # participants test quite the same panel, so a show of hands
+                # cannot settle it - protocol TP-NHRTI-BACT-001 takes the
+                # assigned value from characterisation and the reference
+                # laboratories instead. Without one the section is not graded.
+                pass
             elif len(values) >= assist.MIN_PARTICIPANTS_FOR_CONSENSUS:
                 # the answer the participants agreed on
                 most_common, count = Counter(values).most_common(1)[0]
@@ -270,8 +338,18 @@ async def evaluate_cycle(db, ptcycle, user):
             if not stat.assigned_value_text:
                 stat.evaluated = False
                 stat.not_evaluated_reason = (
-                    "No stated value for this panel and no majority among the "
-                    "participants, so no value could be assigned"
+                    "No stated value for this panel of antibiotics, so the AST "
+                    "section could not be graded"
+                    if attribute == AST_ATTRIBUTE
+                    else "No stated value for this panel and no majority among "
+                    "the participants, so no value could be assigned"
+                )
+            elif attribute == AST_ATTRIBUTE:
+                stat.evaluated = True
+                stat.concordant_count = sum(
+                    1 for v in values
+                    if _grade_ast(v, stat.assigned_value_text, policy)[0]
+                    == assist.GRADE_ACCEPTABLE
                 )
             else:
                 stat.evaluated = True
@@ -315,7 +393,7 @@ async def evaluate_cycle(db, ptcycle, user):
                 ev.not_evaluated_reason = _not_reported_reason(f, row)
                 # the sample was gradable, so failing to report it costs marks
                 if stat.evaluated:
-                    ev.max_score = policy.max_per_attribute
+                    ev.max_score = policy.max_for(attribute)
 
             elif not stat.evaluated:
                 ev.grade = assist.GRADE_NOT_EVALUATED
@@ -328,22 +406,40 @@ async def evaluate_cycle(db, ptcycle, user):
                     ev.reported_text = getattr(row, attribute)
 
             elif k == QUANT:
-                ev.max_score = policy.max_per_attribute
+                ev.max_score = policy.max_for(attribute)
                 value = getattr(row, attribute)
                 ev.reported_numeric = value
                 ev.deviation = round(value - stat.assigned_value_numeric, 4)
                 ev.z_score = round(ev.deviation / stat.robust_sd, 4)
                 ev.grade, ev.score = assist.grade_for_z_score(
-                    ev.z_score, policy
+                    ev.z_score, policy, attribute
                 )
                 ev.evaluated = True
 
+            elif attribute == AST_ATTRIBUTE:
+                # the AST section is a table, scored on the discs the
+                # participant actually tested
+                ev.max_score = policy.max_for(attribute)
+                value = getattr(row, attribute)
+                ev.reported_text = value
+                ev.grade, ev.score, disagreement = _grade_ast(
+                    value, stat.assigned_value_text, policy
+                )
+                ev.evaluated = ev.grade != assist.GRADE_NOT_EVALUATED
+                if not ev.evaluated:
+                    ev.not_evaluated_reason = (
+                        "None of the antibiotics reported have a stated result "
+                        "for this sample"
+                    )
+                elif disagreement:
+                    ev.not_evaluated_reason = disagreement
+
             else:
-                ev.max_score = policy.max_per_attribute
+                ev.max_score = policy.max_for(attribute)
                 value = getattr(row, attribute)
                 ev.reported_text = value
                 ev.grade, ev.score = assist.grade_for_agreement(
-                    value, stat.assigned_value_text, policy
+                    value, stat.assigned_value_text, policy, attribute
                 )
                 ev.evaluated = True
 

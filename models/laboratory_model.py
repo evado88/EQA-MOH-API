@@ -83,6 +83,7 @@ class LaboratoryDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="laboratory", lazy='raise')
     hivvlresult = relationship("HIVVLResultDB", back_populates="laboratory", lazy='raise')
     hiveidresult = relationship("HIVEIDResultDB", back_populates="laboratory", lazy='raise')
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="laboratory", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
 class Laboratory(BaseModel):

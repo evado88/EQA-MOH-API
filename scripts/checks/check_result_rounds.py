@@ -24,6 +24,7 @@ FORMS = [
     ("tb-xpert-xdr-results", "tb_xpert_xdr_results"),
     ("hiv-vl-results", "hiv_vl_results"),
     ("hiv-eid-results", "hiv_eid_results"),
+    ("bacteriology-results", "bacteriology_results"),
 ]
 
 # what the round picker binds to

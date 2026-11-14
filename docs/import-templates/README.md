@@ -29,8 +29,9 @@ already be in the system for the row to match. So:
 3. `tb_xpert_xdr-import.csv`
 4. `hiv_vl-import.csv`
 5. `hiv_eid-import.csv`
+6. `bacteriology-import.csv`
 
-The four result files are independent of each other and can be loaded in any
+The five result files are independent of each other and can be loaded in any
 order among themselves.
 
 ## In the app
@@ -54,7 +55,7 @@ The endpoints below are what that page calls, and are equally usable directly.
 | `POST` | `/imports/{form}` | Uploads a completed template |
 
 `{form}` is one of `laboratory`, `tb_xpert_ultra`, `tb_xpert_xdr`, `hiv_vl`,
-`hiv_eid`.
+`hiv_eid`, `bacteriology`.
 
 The upload takes the file as multipart `file`, plus two query parameters:
 
@@ -193,9 +194,32 @@ historical row genuinely is incomplete, import it as `Draft`.
 | `tb_xpert_xdr` | CDL-PT-F-027 Xpert MTB/XDR Result Form | 28 |
 | `hiv_vl` | TF-009 HIV-1 Viral Load Result Report Form | 22 |
 | `hiv_eid` | TF-012 HIV-1 Early Infant Diagnosis Result Report Form | 22 |
+| `bacteriology` | TF-NHRTI-BACT-001 Bacteriology Participant's Worksheet | 34 |
 
 `GET /imports/{form}/columns` returns the type, whether it is required, and the
 notes for every column — that is the authoritative column reference.
+
+### The bacteriology AST table
+
+The bacteriology worksheet is the one form that carries a table rather than
+only fields: up to fifteen antibiotics for disk diffusion and fifteen for MIC.
+A CSV cell cannot hold a table, so the whole section goes in the `astresult`
+column, one antibiotic per entry, separated by `|`:
+
+```
+disk:CIPROFLOXACIN:20:S|disk:CEFTRIAXONE:10:R|mic:AMIKACIN:<=0.5:S
+```
+
+Each entry reads `method:antibiotic:reading:interpretation`, where
+
+- `method` is `disk` (the Kirby Bauer table) or `mic`,
+- `reading` is the zone diameter in mm for `disk`, or the MIC for `mic`,
+- `interpretation` is `S`, `I`, `SDD` or `R`.
+
+The row numbers on the paper worksheet are presentation only, so they are
+handed out in the order the entries are written. Leave the cell blank when no
+susceptibility testing was done — four of the five samples in a survey are
+shipped for identification only.
 
 ## Checking the importer
 

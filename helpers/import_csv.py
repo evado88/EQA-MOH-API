@@ -21,16 +21,25 @@ from datetime import datetime
 
 from pydantic import ValidationError
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
 from helpers import assist
 from models.applications_model import ApplicationsDB
 from models.district_model import DistrictDB
 from models.enrollment_model import EnrollmentDB
+from models.bacteriologyresult_model import (
+    AST_METHOD_DISK_DIFFUSION,
+    AST_METHOD_MIC,
+    BacteriologyASTResultDB,
+    BacteriologyResult,
+    BacteriologyResultDB,
+)
 from models.hiveidresult_model import HIVEIDResult, HIVEIDResultDB
 from models.hivvlresult_model import HIVVLResult, HIVVLResultDB
 from models.laboratory_model import LaboratoryDB
 from models.labtype_model import LabTypeDB
 from models.method_model import (
+    RESULT_FORM_BACTERIOLOGY,
     RESULT_FORM_HIV_EID,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_TB_XPERT_ULTRA,
@@ -51,6 +60,13 @@ from models.user_model import UserDB
 TEXT = "text"
 DATE = "date"
 NUMBER = "number"
+BOOLEAN = "boolean"
+# a column holding a whole child table, packed into one cell - see AST_TABLE
+CHILD_TABLE = "child_table"
+
+# how a spreadsheet is likely to have written a tick box
+TRUE_WORDS = ("yes", "y", "true", "1", "tick", "ticked", "x")
+FALSE_WORDS = ("no", "n", "false", "0", "", "-")
 
 # the ways a migration source is likely to have written a date. ISO first,
 # because that is what a spreadsheet exports when the cell is a real date.
@@ -69,7 +85,8 @@ class RowError(Exception):
 
 
 class Column:
-    def __init__(self, name, label, kind=TEXT, required=False, note="", field=None):
+    def __init__(self, name, label, kind=TEXT, required=False, note="", field=None,
+                 parser=None):
         self.name = name
         self.label = label
         self.kind = kind
@@ -77,6 +94,16 @@ class Column:
         self.note = note
         # the attribute this column lands on; a lookup key has none
         self.field = field
+        # for a CHILD_TABLE column, what turns the packed cell into rows
+        self.parser = parser
+
+    def parse_child(self, text):
+        try:
+            return self.parser(text)
+        except RowError:
+            raise
+        except ValueError as error:
+            raise RowError(f"{self.label}: {error}", self.name)
 
     def parse(self, raw):
         text = "" if raw is None else str(raw).strip()
@@ -91,6 +118,16 @@ class Column:
                 return float(text)
             except ValueError:
                 raise RowError(f"{self.label} must be a number, not '{text}'", self.name)
+
+        if self.kind == BOOLEAN:
+            if text.lower() in TRUE_WORDS:
+                return True
+            if text.lower() in FALSE_WORDS:
+                return False
+            raise RowError(f"{self.label} must be Yes or No, not '{text}'", self.name)
+
+        if self.kind == CHILD_TABLE:
+            return self.parse_child(text)
 
         if self.kind == DATE:
             for fmt in DATE_FORMATS:
@@ -176,7 +213,7 @@ class FormSpec:
     """One importable form: what it is called, what it writes, and its columns"""
 
     def __init__(self, key, label, source, db_model, schema, columns, samples,
-                 kind="result"):
+                 kind="result", child_field=None, child_model=None):
         self.key = key
         self.label = label
         # the paper form or register the data comes off
@@ -186,6 +223,10 @@ class FormSpec:
         self.columns = columns
         self.samples = samples
         self.kind = kind
+        # a form whose paper version carries a table rather than only fields
+        # names the relationship it lands on and the row it is written as
+        self.child_field = child_field
+        self.child_model = child_model
 
     @property
     def headers(self):
@@ -200,10 +241,21 @@ class FormSpec:
     @property
     def value_columns(self):
         """The columns that land on the row itself rather than locating it"""
-        return [c for c in self.columns if c.field]
+        return [
+            c for c in self.columns
+            if c.field and c.field != self.child_field
+        ]
+
+    @property
+    def child_column(self):
+        """The column holding the form's child table, if it has one"""
+        if not self.child_field:
+            return None
+        return self.column(self.child_field)
 
 
-def _result_spec(key, label, source, db_model, schema, columns, samples):
+def _result_spec(key, label, source, db_model, schema, columns, samples,
+                 child_field=None, child_model=None):
     return FormSpec(
         key=key,
         label=label,
@@ -213,6 +265,8 @@ def _result_spec(key, label, source, db_model, schema, columns, samples):
         columns=_result_key_columns() + columns,
         samples=samples,
         kind="result",
+        child_field=child_field,
+        child_model=child_model,
     )
 
 
@@ -567,6 +621,191 @@ LABORATORY_SAMPLES = [
 ]
 
 
+# ---------- Bacteriology, worksheet TF-NHRTI-BACT-001 ----------
+# The worksheet carries a table of antibiotics, which a CSV cell cannot hold as
+# a table. It is packed into one cell instead, one antibiotic per entry:
+#
+#     disk:CIPROFLOXACIN:20:S|disk:MEROPENEM:24:S|mic:AMIKACIN:<=0.5:S
+#
+# 'disk' and 'mic' are the two tables on the worksheet, the third part is the
+# reading (a zone in mm, or a MIC) and the fourth the interpretation. The row
+# numbers on the worksheet are presentation, so they are handed out in the
+# order the entries are written.
+AST_CELL_ROW_SEPARATOR = "|"
+AST_CELL_FIELD_SEPARATOR = ":"
+
+AST_CELL_METHODS = {
+    "disk": AST_METHOD_DISK_DIFFUSION,
+    "disk_diffusion": AST_METHOD_DISK_DIFFUSION,
+    "kirby bauer": AST_METHOD_DISK_DIFFUSION,
+    "mic": AST_METHOD_MIC,
+}
+
+AST_CELL_NOTE = (
+    "The antibiotics tested, as "
+    "'disk:AGENT:ZONE:INTERPRETATION' or 'mic:AGENT:MIC:INTERPRETATION', "
+    "separated by '|'. Interpretation is S, I, SDD or R. "
+    "Leave blank when no AST was done"
+)
+
+
+def _parse_ast_cell(text):
+    """Unpacks the AST cell into the rows the worksheet holds"""
+    rows = []
+    numbering = {}
+
+    for entry in text.split(AST_CELL_ROW_SEPARATOR):
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        parts = [p.strip() for p in entry.split(AST_CELL_FIELD_SEPARATOR)]
+        if len(parts) != 4:
+            raise ValueError(
+                f"'{entry}' must read 'method:antibiotic:reading:interpretation'"
+            )
+
+        method, antibiotic, reading, interpretation = parts
+
+        resolved = AST_CELL_METHODS.get(method.lower())
+        if not resolved:
+            raise ValueError(
+                f"'{method}' is not an AST method; use "
+                f"{' or '.join(sorted(set(AST_CELL_METHODS)))}"
+            )
+
+        numbering[resolved] = numbering.get(resolved, 0) + 1
+
+        row = {
+            "ast_method": resolved,
+            "row_no": numbering[resolved],
+            "antibiotic": antibiotic,
+            "interpretation": interpretation or None,
+        }
+
+        if resolved == AST_METHOD_DISK_DIFFUSION:
+            if reading:
+                try:
+                    row["zone_diameter"] = float(reading)
+                except ValueError:
+                    raise ValueError(
+                        f"the zone diameter for {antibiotic} must be a number, "
+                        f"not '{reading}'"
+                    )
+        else:
+            row["mic_reading"] = reading or None
+
+        rows.append(row)
+
+    return rows or None
+
+
+BACTERIOLOGY_COLUMNS = [
+    _field("date_samples_received", "Receipt Date of PT Samples", DATE,
+           "Required once submitted"),
+    _field("receipt_temperature", "Receipt Temperature", NUMBER,
+           "Degrees C on arrival"),
+    _field("sample_condition", "Sample Condition", TEXT,
+           "Suitable or Unsuitable. Required once submitted"),
+    _field("sample_condition_reason", "Sample Condition Reason", TEXT,
+           "Only when the sample was unsuitable"),
+    _field("date_submitted", "Date of Submission", DATE),
+    _field("testing_not_done", "Testing Not Done", BOOLEAN,
+           "Yes when the specimen or isolate could not be worked at all"),
+    _field("testing_not_done_reason", "Testing Not Done Reason", TEXT,
+           "Only when testing was not done, and required then"),
+    _field("gram_stain_reaction", "Stain Reaction", TEXT,
+           "Gram positive, Gram negative or Gram variable"),
+    _field("gram_morphology", "Morphology", TEXT,
+           "Cocci, Diplococci, Bacilli, Yeast, Cocco-bacilli or Other"),
+    _field("gram_morphology_other", "Morphology (Other)", TEXT,
+           "Only when the Morphology is Other, and required then"),
+    _field("microscopy_comment", "Microscopy Comment", TEXT),
+    _field("organism_identified", "Organism Identified", TEXT,
+           "Required once submitted, unless testing was not done"),
+    _field("identification_comment", "Identification Comment", TEXT),
+    _field("ast_performed", "AST Performed", BOOLEAN,
+           "Yes when susceptibility testing was carried out"),
+    _field("ast_guideline", "AST Guideline", TEXT,
+           "CLSI or EUCAST. Required when AST was performed"),
+    _field("ast_disk_diffusion", "Disk Diffusion Used", BOOLEAN,
+           "Yes when the Kirby Bauer method was used"),
+    _field("ast_mic_method", "MIC Method", TEXT,
+           "Broth Microdilution in house, Etest, Vitek 2, MicroScan, AutoMic, "
+           "Maldi Tof or Other"),
+    _field("ast_mic_method_other", "MIC Method (Other)", TEXT,
+           "Only when the MIC Method is Other, and required then"),
+    Column("astresult", "AST Results", kind=CHILD_TABLE, field="astresult",
+           note=AST_CELL_NOTE, parser=_parse_ast_cell),
+    _field("comments", "Comments", TEXT),
+    _field("reported_by", "Reported By", TEXT),
+    _field("reported_on", "Reported On", DATE),
+    _field("reviewed_by", "Reviewed By", TEXT),
+    _field("reviewed_on", "Reviewed On", DATE),
+]
+
+_BACT_KEYS = {
+    "scheme": "Bacteriology", "service": "Bacteriology (MCS)",
+    "method": "Manual", "pt_cycle_code": "BACT-01-2026",
+    "lab_code": "REG0001", "lab_email": "", "captured_by": "",
+    "status": "Approved",
+}
+
+BACTERIOLOGY_SAMPLES = [
+    {
+        **_BACT_KEYS, "sample": "NHRTIBACT A01-26",
+        "description": "Migrated from the BACT-01-2026 register",
+        "date_samples_received": "2026-04-30", "receipt_temperature": "6.5",
+        "sample_condition": "Suitable", "sample_condition_reason": "",
+        "date_submitted": "2026-05-20", "testing_not_done": "No",
+        "testing_not_done_reason": "",
+        "gram_stain_reaction": "Gram negative", "gram_morphology": "Bacilli",
+        "gram_morphology_other": "", "microscopy_comment": "",
+        "organism_identified": "Escherichia coli",
+        "identification_comment": "", "ast_performed": "No",
+        "ast_guideline": "", "ast_disk_diffusion": "No", "ast_mic_method": "",
+        "ast_mic_method_other": "", "astresult": "",
+        "comments": "", "reported_by": "M. Banda", "reported_on": "2026-05-20",
+        "reviewed_by": "C. Phiri", "reviewed_on": "2026-05-21",
+    },
+    {
+        # sample E is the one the protocol asks for AST on
+        **_BACT_KEYS, "sample": "NHRTIBACT E01-26", "description": "",
+        "date_samples_received": "2026-04-30", "receipt_temperature": "6.5",
+        "sample_condition": "Suitable", "sample_condition_reason": "",
+        "date_submitted": "2026-05-20", "testing_not_done": "No",
+        "testing_not_done_reason": "",
+        "gram_stain_reaction": "Gram negative", "gram_morphology": "Bacilli",
+        "gram_morphology_other": "", "microscopy_comment": "Capsulated",
+        "organism_identified": "Klebsiella pneumoniae",
+        "identification_comment": "", "ast_performed": "Yes",
+        "ast_guideline": "CLSI", "ast_disk_diffusion": "Yes",
+        "ast_mic_method": "", "ast_mic_method_other": "",
+        "astresult": "disk:CIPROFLOXACIN:20:S|disk:MEROPENEM:24:S|"
+                     "disk:CEFTRIAXONE:12:R",
+        "comments": "", "reported_by": "M. Banda", "reported_on": "2026-05-20",
+        "reviewed_by": "C. Phiri", "reviewed_on": "2026-05-21",
+    },
+    {
+        # a specimen that could not be worked at all
+        **_BACT_KEYS, "sample": "NHRTIBACT C01-26", "description": "",
+        "date_samples_received": "2026-04-30", "receipt_temperature": "14.0",
+        "sample_condition": "Unsuitable",
+        "sample_condition_reason": "Swab arrived dry, transport medium leaked",
+        "date_submitted": "2026-05-20", "testing_not_done": "Yes",
+        "testing_not_done_reason": "Sample unsuitable on receipt",
+        "gram_stain_reaction": "", "gram_morphology": "",
+        "gram_morphology_other": "", "microscopy_comment": "",
+        "organism_identified": "", "identification_comment": "",
+        "ast_performed": "No", "ast_guideline": "", "ast_disk_diffusion": "No",
+        "ast_mic_method": "", "ast_mic_method_other": "", "astresult": "",
+        "comments": "Replacement requested", "reported_by": "M. Banda",
+        "reported_on": "2026-05-20", "reviewed_by": "C. Phiri",
+        "reviewed_on": "2026-05-21",
+    },
+]
+
+
 # ---------- The registry ----------
 FORM_SPECS = {
     RESULT_FORM_TB_XPERT_ULTRA: _result_spec(
@@ -605,6 +844,17 @@ FORM_SPECS = {
         columns=HIV_EID_COLUMNS,
         samples=HIV_EID_SAMPLES,
     ),
+    RESULT_FORM_BACTERIOLOGY: _result_spec(
+        key=RESULT_FORM_BACTERIOLOGY,
+        label="Bacteriology Result",
+        source="TF-NHRTI-BACT-001 Bacteriology Participants Worksheet",
+        db_model=BacteriologyResultDB,
+        schema=BacteriologyResult,
+        columns=BACTERIOLOGY_COLUMNS,
+        samples=BACTERIOLOGY_SAMPLES,
+        child_field="astresult",
+        child_model=BacteriologyASTResultDB,
+    ),
     LAB_IMPORT: FormSpec(
         key=LAB_IMPORT,
         label="Laboratory",
@@ -625,6 +875,7 @@ IMPORT_ORDER = [
     RESULT_FORM_TB_XPERT_XDR,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_HIV_EID,
+    RESULT_FORM_BACTERIOLOGY,
 ]
 
 
@@ -955,19 +1206,29 @@ async def _import_result_row(db, spec, lookups, values, importer, counts):
     for column in spec.value_columns:
         payload[column.field] = values.get(column.name)
 
+    if spec.child_field:
+        # the form carries a table; it is checked with the rest of the form
+        payload[spec.child_field] = values.get(spec.child_field)
+
     try:
         validated = spec.schema(**payload)
     except ValidationError as error:
         raise RowError(_first_message(error), _first_column(error, spec))
 
     # one sheet per sample, per lab, per cycle - the table says so
-    result = await db.execute(
-        select(spec.db_model).where(
-            spec.db_model.pt_cycle_id == cycle.id,
-            spec.db_model.lab_id == laboratory.id,
-            spec.db_model.method_sample_id == sample.id,
-        )
+    query = select(spec.db_model).where(
+        spec.db_model.pt_cycle_id == cycle.id,
+        spec.db_model.lab_id == laboratory.id,
+        spec.db_model.method_sample_id == sample.id,
     )
+
+    if spec.child_field:
+        # replacing the table means knowing what is already on it
+        query = query.options(
+            selectinload(getattr(spec.db_model, spec.child_field))
+        )
+
+    result = await db.execute(query)
     row = result.scalars().first()
     action = "updated" if row else "created"
 
@@ -993,6 +1254,21 @@ async def _import_result_row(db, spec, lookups, values, importer, counts):
 
     for column in spec.value_columns:
         setattr(row, column.field, getattr(validated, column.field))
+
+    if spec.child_field:
+        # the participant fills the table in as a whole, so an import of it
+        # replaces what was there rather than adding to it
+        setattr(row, spec.child_field, [
+            spec.child_model(
+                **child.dict(
+                    exclude_unset=False,
+                    exclude={"id", "created_at", "created_by",
+                             "updated_at", "updated_by"},
+                ),
+                created_by=importer.email,
+            )
+            for child in (getattr(validated, spec.child_field) or [])
+        ])
 
     # the real state the row is migrated into, not the one it was checked as
     row.status_id = status_id

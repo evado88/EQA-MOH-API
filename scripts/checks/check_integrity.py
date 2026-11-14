@@ -14,7 +14,8 @@ CHECKS = []
 for table, form in (("tb_xpert_ultra_results", "tb_xpert_ultra"),
                     ("tb_xpert_xdr_results", "tb_xpert_xdr"),
                     ("hiv_vl_results", "hiv_vl"),
-                    ("hiv_eid_results", "hiv_eid")):
+                    ("hiv_eid_results", "hiv_eid"),
+                    ("bacteriology_results", "bacteriology")):
     CHECKS += [
         (f"{table}: opened on the wrong form",
          f"""select t.id from {table} t join methods m on m.id=t.method_id
@@ -137,7 +138,7 @@ CHECKS += [
         join tb_xpert_xdr_results x
           on x.pt_cycle_id=u.pt_cycle_id and x.lab_id=u.lab_id
          and x.method_sample_id=u.method_sample_id"""),
-    ("an accepted Ultra/XDR enrolment with no sheets at all",
+    ("an accepted enrolment on a built form with no sheets at all",
      """select e.id from enrollments e
         join methods m on m.id=e.method_id
         join pt_cycles c on c.id=e.pt_cycle_id
@@ -146,7 +147,67 @@ CHECKS += [
           and not exists (select 1 from tb_xpert_ultra_results t where t.enrollment_id=e.id)
           and not exists (select 1 from tb_xpert_xdr_results t where t.enrollment_id=e.id)
           and not exists (select 1 from hiv_vl_results t where t.enrollment_id=e.id)
-          and not exists (select 1 from hiv_eid_results t where t.enrollment_id=e.id)"""),
+          and not exists (select 1 from hiv_eid_results t where t.enrollment_id=e.id)
+          and not exists (select 1 from bacteriology_results t where t.enrollment_id=e.id)"""),
+    # the bacteriology worksheet, TF-NHRTI-BACT-001
+    ("bacteriology: a worked specimen with no stain reaction once submitted",
+     """select id from bacteriology_results where status_id in (2,4)
+        and not testing_not_done and gram_stain_reaction is null"""),
+    ("bacteriology: a worked specimen with no organism once submitted",
+     """select id from bacteriology_results where status_id in (2,4)
+        and not testing_not_done and organism_identified is null"""),
+    ("bacteriology: a result recorded although testing was not done",
+     """select id from bacteriology_results where testing_not_done
+        and (gram_stain_reaction is not null or organism_identified is not null)"""),
+    ("bacteriology: testing not done without a reason once submitted",
+     """select id from bacteriology_results where status_id in (2,4)
+        and testing_not_done and testing_not_done_reason is null"""),
+    ("bacteriology: an AST row on a worksheet that reports no AST",
+     """select r.id from bacteriology_results r
+        where not r.ast_performed
+          and exists (select 1 from bacteriology_ast_results a
+                      where a.bacteriology_result_id = r.id)"""),
+    ("bacteriology: an AST row with no interpretation once submitted",
+     """select a.id from bacteriology_ast_results a
+        join bacteriology_results r on r.id = a.bacteriology_result_id
+        where r.status_id in (2,4) and a.interpretation is null"""),
+    ("bacteriology: an AST row whose reading does not match its method",
+     """select id from bacteriology_ast_results
+        where (ast_method = 'disk_diffusion' and mic_reading is not null)
+           or (ast_method = 'mic' and zone_diameter is not null)"""),
+    ("bacteriology: an AST row on neither of the worksheet's tables",
+     """select id from bacteriology_ast_results
+        where ast_method not in ('disk_diffusion', 'mic')
+           or row_no < 1 or row_no > 15"""),
+    ("bacteriology: an orphaned AST row",
+     """select a.id from bacteriology_ast_results a
+        left join bacteriology_results r on r.id = a.bacteriology_result_id
+        where r.id is null"""),
+    # the noticeboard
+    ("announcements: published without a record of who published it",
+     """select id from announcements where status_id = 4
+        and (published_at is null or published_by is null)"""),
+    ("announcements: published with nothing written in it",
+     """select id from announcements where status_id = 4
+        and (body is null or length(btrim(body)) < 10)"""),
+    ("announcements: an occasion published with no date",
+     """select id from announcements where status_id = 4
+        and category in ('Event', 'Meeting') and event_at is null"""),
+    ("announcements: a date on something that is not an occasion",
+     """select id from announcements
+        where category not in ('Event', 'Meeting') and event_at is not null"""),
+    ("announcements: a category the board does not offer",
+     """select id from announcements
+        where category not in ('Event', 'Meeting', 'Resource', 'General')"""),
+    ("announcements: an audience the board does not offer",
+     """select id from announcements
+        where audience not in ('All Participants', 'Scheme')"""),
+    ("announcements: a published Resource pointing nowhere",
+     """select a.id from announcements a
+        where a.status_id = 4 and a.category = 'Resource'
+          and a.link_url is null
+          and not exists (select 1 from attachments t
+                          where t.type = 'Announcement' and t.parent = a.id)"""),
     ("a cycle whose enrolment belongs to another scheme",
      """select e.id from enrollments e join pt_cycles c on c.id=e.pt_cycle_id
         where e.scheme_id <> c.scheme_id"""),
@@ -189,8 +250,12 @@ async def go():
         union all
         select m.name, m.result_form, count(*)
         from hiv_eid_results t join methods m on m.id=t.method_id
+        group by 1,2
+        union all
+        select m.name, m.result_form, count(*)
+        from bacteriology_results t join methods m on m.id=t.method_id
         group by 1,2 order by 1"""):
-        print(f"   {r['method']:8} {r['result_form']:16} {r['c']}")
+        print(f"   {r['method']:22} {r['result_form']:16} {r['c']}")
 
     await con.close()
     return 1 if bad else 0

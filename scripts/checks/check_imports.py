@@ -26,12 +26,17 @@ RESULT_TABLES = {
     "tb_xpert_xdr": "tb_xpert_xdr_results",
     "hiv_vl": "hiv_vl_results",
     "hiv_eid": "hiv_eid_results",
+    "bacteriology": "bacteriology_results",
 }
 
 
 async def _counts(con):
     """What the tables an import can touch hold right now"""
-    tables = list(RESULT_TABLES.values()) + ["laboratorys", "enrollments", "applications"]
+    tables = list(RESULT_TABLES.values()) + [
+        # the bacteriology worksheet carries a table of its own
+        "bacteriology_ast_results",
+        "laboratorys", "enrollments", "applications",
+    ]
     return {
         table: await con.fetchval(f"select count(*) from {table}") for table in tables
     }
@@ -94,6 +99,11 @@ async def main():
             )
             for column in spec.value_columns:
                 payload[column.field] = values.get(column.name)
+
+            if spec.child_field:
+                # a form whose paper version carries a table is only complete
+                # with it - see the AST section of the bacteriology worksheet
+                payload[spec.child_field] = values.get(spec.child_field)
 
             try:
                 spec.schema(**payload)

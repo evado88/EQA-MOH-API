@@ -59,7 +59,12 @@ async def go():
         where (result_form = 'hiv_eid' and (
                  (grade = 'Acceptable' and score <> 20) or
                  (grade <> 'Acceptable' and score <> 0)))
-           or (result_form <> 'hiv_eid' and (
+           or (result_form = 'bacteriology' and (
+                 -- TP-NHRTI-BACT-001 pays a different mark per question, so
+                 -- the mark for a correct answer is the one on the row
+                 (grade = 'Acceptable' and score <> max_score) or
+                 (grade <> 'Acceptable' and score <> 0)))
+           or (result_form not in ('hiv_eid', 'bacteriology') and (
                  (grade = 'Acceptable'   and score <> 2) or
                  (grade = 'Warning'      and score <> 1) or
                  (grade = 'Unacceptable' and score <> 0)))""")
@@ -69,6 +74,37 @@ async def go():
     check("EID scores 20 marks a sample",
           (await con.fetchval("""select count(*) from pt_result_evaluations
                                  where result_form='hiv_eid' and max_score=20""")) > 0)
+
+    # TP-NHRTI-BACT-001 section 17.1: 3 for the stain reaction, 3 for the
+    # morphology, 10 for the identification and 20 for the AST
+    bad = await con.fetch("""
+        select id, attribute, max_score from pt_result_evaluations
+        where result_form = 'bacteriology' and max_score > 0
+          and max_score <> case attribute
+                             when 'gram_stain_reaction' then 3
+                             when 'gram_morphology'     then 3
+                             when 'organism_identified' then 10
+                             when 'ast_result'          then 20
+                           end""")
+    check("bacteriology pays the marks in protocol section 17.1", not bad,
+          [dict(r) for r in bad[:3]])
+
+    # and those marks add up to the 100 the protocol totals
+    bad = await con.fetch("""
+        select id, max_score from pt_enrollment_performance
+        where result_form = 'bacteriology' and max_score <> 100""")
+    check("a bacteriology participant is scored out of 100", not bad,
+          [dict(r) for r in bad[:3]])
+
+    # the AST section is asked for on one sample of the five
+    bad = await con.fetch("""
+        select pt_cycle_id, enrollment_id, count(*) c
+        from pt_result_evaluations
+        where result_form = 'bacteriology' and attribute = 'ast_result'
+          and max_score > 0
+        group by 1, 2 having count(*) <> 1""")
+    check("AST is scored on one sample of the survey", not bad,
+          [dict(r) for r in bad[:3]])
 
     print("\nFailure to participate")
     # TF-006: a sample the lab did not report still counts against it
@@ -128,7 +164,11 @@ async def go():
             (result_form = 'hiv_eid' and (
                 (percent_score >= 1.0 and overall_performance <> 'Satisfactory') or
                 (percent_score <  1.0 and overall_performance <> 'Unsatisfactory')))
-         or (result_form <> 'hiv_eid' and (
+         or (result_form = 'bacteriology' and (
+                -- TP-NHRTI-BACT-001 section 17.2: the bar is the full 100%
+                (percent_score >= 1.0 and overall_performance <> 'Satisfactory') or
+                (percent_score <  1.0 and overall_performance <> 'Unsatisfactory')))
+         or (result_form not in ('hiv_eid', 'bacteriology') and (
                 (percent_score >= 0.80 and overall_performance <> 'Satisfactory') or
                 (percent_score <  0.80 and overall_performance <> 'Unsatisfactory'))))""")
     check("performance follows each scheme's own threshold", not bad,
