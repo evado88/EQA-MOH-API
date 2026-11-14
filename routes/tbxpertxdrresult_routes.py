@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
+from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.tbxpertxdrresult_model import (
     CT_VALUE_FIELDS,
@@ -282,14 +283,11 @@ async def update_tbxpertxdrresult(
             detail="You are not permitted to capture results for another laboratory",
         )
 
-    if tbxpertxdrresult.status_id == assist.STATUS_APPROVED:
-        raise HTTPException(
-            status_code=400,
-            detail="This result has been approved and can no longer be changed",
-        )
+    # result submission needs no approval; the lab may resubmit until the
+    # cycle's result submission due date (enforced by pt_result_capture_open)
 
     cycle_status = tbxpertxdrresult.ptcycle.pt_cyle_status_id
-    if cycle_status not in assist.PT_CYCLE_RESULT_CAPTURE_OPEN:
+    if not assist.pt_result_capture_open(tbxpertxdrresult.ptcycle):
         current_name = assist.PT_CYCLE_STATUS_NAMES.get(cycle_status, cycle_status)
         raise HTTPException(
             status_code=400,
@@ -315,6 +313,10 @@ async def update_tbxpertxdrresult(
             setattr(tbxpertxdrresult, key, changes[key])
 
     tbxpertxdrresult.updated_by = user.email
+
+    # audit: record each submission (a lab may resubmit until the due date)
+    if tbxpertxdrresult.status_id == assist.STATUS_SUBMITTED:
+        await log_result_submission(db, "tb_xpert_xdr", tbxpertxdrresult, user.email)
 
     try:
         await db.commit()

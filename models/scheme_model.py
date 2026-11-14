@@ -32,6 +32,15 @@ class SchemeDB(Base):
     form_terms_authority = Column(String, nullable=True)
     requires_confidentiality_waiver = Column(Boolean, nullable=False, default=False)
 
+    # registration payment configuration (set by administrators). Local
+    # (Zambian) applicants are charged in ZMW and may use mobile money;
+    # international applicants are charged in USD.
+    registration_fee_usd = Column(Float, nullable=True)
+    registration_fee_zmw = Column(Float, nullable=True)
+    bank_account_details = Column(String, nullable=True)
+    mobile_money_details = Column(String, nullable=True)
+    payment_instructions = Column(String, nullable=True)
+
     # properties
     provider_id = Column(Integer, ForeignKey("providers.id"), nullable=False)
     # approval
@@ -103,6 +112,13 @@ class Scheme(BaseModel):
     form_version: Optional[str] = None
     form_terms_authority: Optional[str] = None
     requires_confidentiality_waiver: Optional[bool] = False
+
+    # registration payment configuration
+    registration_fee_usd: Optional[float] = None
+    registration_fee_zmw: Optional[float] = None
+    bank_account_details: Optional[str] = None
+    mobile_money_details: Optional[str] = None
+    payment_instructions: Optional[str] = None
 
     # properties
     provider_id: int = Field(

@@ -36,6 +36,7 @@ from routes import import_routes
 from routes import dashboard_routes
 from routes import facility_routes
 from routes import registration_routes
+from routes import result_submission_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,9 +99,23 @@ app.include_router(import_routes.router)
 app.include_router(dashboard_routes.router)
 app.include_router(facility_routes.router)
 app.include_router(registration_routes.router)
+app.include_router(result_submission_routes.router)
 
 
 # create tables at startup
+
+async def _daily_pt_cycle_job():
+    """Runs once a day: sends due PT cycle reminders and refreshes cached
+    statuses. Opens its own session since it runs outside a request."""
+    from database import AsyncSessionLocal
+    from routes.ptcycle_routes import run_pt_cycle_reminders
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await run_pt_cycle_reminders(db)
+            print(f"[scheduler] pt-cycle job: {result.reminders_sent} reminder(s) sent")
+    except Exception as e:
+        print(f"[scheduler] pt-cycle job failed: {e}")
+
 
 @app.on_event("startup")
 async def startup():
@@ -108,10 +123,23 @@ async def startup():
     async with engine.begin() as conn:
         print("Application starting up old...")
         await conn.run_sync(Base.metadata.create_all)
-        
+
+    # daily in-app scheduler for PT cycle reminders / status refresh
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    scheduler = AsyncIOScheduler(timezone="Africa/Lusaka")
+    scheduler.add_job(
+        _daily_pt_cycle_job, "cron", hour=7, minute=0,
+        id="pt_cycle_reminders", replace_existing=True,
+    )
+    scheduler.start()
+    app.state.scheduler = scheduler
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await close_client()
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler:
+        scheduler.shutdown(wait=False)
     
 def get_httpsx_client():
     return app.state.client

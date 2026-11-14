@@ -52,6 +52,14 @@ class LaboratoryDB(Base):
     terms_accepted = Column(Boolean, nullable=False, default=False)
     terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     confidentiality_waiver = Column(Boolean, nullable=True)
+    # payment step: whether the approver required payment, the amount/currency
+    # due (snapshot), and the applicant's proof of payment
+    payment_required = Column(Boolean, nullable=False, default=False)
+    payment_currency = Column(String, nullable=True)
+    payment_amount = Column(Float, nullable=True)
+    payment_proof_attachment_id = Column(Integer, ForeignKey("attachments.id"), nullable=True)
+    payment_reference = Column(String, nullable=True)
+    payment_submitted_at = Column(DateTime(timezone=True), nullable=True)
     # approval
     # user - null until an admin approves the registration and the lab account is created
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -160,6 +168,13 @@ class Laboratory(BaseModel):
     terms_accepted: Optional[bool] = None
     terms_accepted_at: Optional[datetime] = None
     confidentiality_waiver: Optional[bool] = None
+    # payment step
+    payment_required: Optional[bool] = None
+    payment_currency: Optional[str] = None
+    payment_amount: Optional[float] = None
+    payment_proof_attachment_id: Optional[int] = None
+    payment_reference: Optional[str] = None
+    payment_submitted_at: Optional[datetime] = None
     # approval
     # user
     user_id: Optional[int] = None
@@ -369,3 +384,50 @@ class SchemeRegistrationResult(BaseModel):
     # true when another user had already registered this facility for this
     # scheme; the submission still goes through for the administrator to decide
     duplicate_warning: bool = False
+
+
+class ParamPaymentProof(BaseModel):
+    """Posted by the applicant to attach proof of payment to a registration that
+    an approver marked as requiring payment."""
+
+    user_email: EmailStr
+    attachment_id: int = Field(..., ge=1, description="The uploaded proof of payment")
+    reference: Optional[str] = None
+
+
+class MyRegistration(BaseModel):
+    """One of a user's own scheme registrations, as the My Registrations page
+    shows it - including, when payment is due, how and how much to pay."""
+
+    id: int
+    code: str
+    name: str
+    registration_number: Optional[str] = None
+
+    scheme_id: Optional[int] = None
+    scheme_name: Optional[str] = None
+
+    status_id: int
+    status_name: Optional[str] = None
+    stage_id: int
+    stage_name: Optional[str] = None
+
+    is_local: bool = True
+
+    # payment state on the registration
+    payment_required: bool = False
+    payment_currency: Optional[str] = None
+    payment_amount: Optional[float] = None
+    payment_reference: Optional[str] = None
+    payment_submitted_at: Optional[datetime] = None
+    payment_proof_attachment_id: Optional[int] = None
+
+    # the scheme's payment details, shown while awaiting payment
+    bank_account_details: Optional[str] = None
+    mobile_money_details: Optional[str] = None
+    payment_instructions: Optional[str] = None
+
+    created_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True

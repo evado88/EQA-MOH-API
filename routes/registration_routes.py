@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, distinct
+from sqlalchemy import func, distinct, text
 from typing import List
 
 import helpers.assist as assist
 from database import get_db
+from helpers.auth import require_user, CurrentUser
 from models.scheme_model import (
     SchemeDB,
     SchemeTile,
@@ -21,6 +22,7 @@ from models.laboratory_model import (
     LaboratoryDB,
     ParamSchemeRegistration,
     SchemeRegistrationResult,
+    MyRegistration,
 )
 from models.applications_model import ApplicationsDB
 from routes.laboratory_routes import _next_laboratory_code
@@ -92,6 +94,76 @@ async def scheme_catalogue(db: AsyncSession = Depends(get_db)):
             )
         )
     return tiles
+
+
+@router.get("/my-registrations", response_model=List[MyRegistration])
+async def my_registrations(
+    db: AsyncSession = Depends(get_db),
+    caller: CurrentUser = Depends(require_user),
+):
+    """The signed-in user's own scheme registrations, with their status and,
+    when payment is due, how and how much to pay."""
+    labs = (
+        await db.execute(
+            select(LaboratoryDB)
+            .where(LaboratoryDB.registered_by_user_id == caller.id)
+            .order_by(LaboratoryDB.id.desc())
+        )
+    ).scalars().all()
+    if not labs:
+        return []
+
+    statuses = {
+        r[0]: r[1]
+        for r in (await db.execute(text("SELECT id, status_name FROM list_statuses"))).all()
+    }
+    stages = {
+        r[0]: r[1]
+        for r in (await db.execute(text("SELECT id, stage_name FROM list_stages"))).all()
+    }
+    schemes = {s.id: s for s in (await db.execute(select(SchemeDB))).scalars().all()}
+
+    out = []
+    for lab in labs:
+        scheme_id = lab.method_list[0].get("scheme_id") if lab.method_list else None
+        scheme = schemes.get(scheme_id)
+        is_local = lab.facility_id is not None
+        reg_no = (
+            await db.execute(
+                select(ApplicationsDB.registration_number)
+                .where(ApplicationsDB.lab_id == lab.id)
+                .limit(1)
+            )
+        ).scalar()
+
+        out.append(
+            MyRegistration(
+                id=lab.id,
+                code=lab.code,
+                name=lab.name,
+                registration_number=reg_no,
+                scheme_id=scheme_id,
+                scheme_name=scheme.name if scheme else None,
+                status_id=lab.status_id,
+                status_name=statuses.get(lab.status_id),
+                stage_id=lab.stage_id,
+                stage_name=stages.get(lab.stage_id),
+                is_local=is_local,
+                payment_required=bool(lab.payment_required),
+                payment_currency=lab.payment_currency,
+                payment_amount=lab.payment_amount,
+                payment_reference=lab.payment_reference,
+                payment_submitted_at=lab.payment_submitted_at,
+                payment_proof_attachment_id=lab.payment_proof_attachment_id,
+                bank_account_details=scheme.bank_account_details if scheme else None,
+                mobile_money_details=(
+                    scheme.mobile_money_details if (scheme and is_local) else None
+                ),
+                payment_instructions=scheme.payment_instructions if scheme else None,
+                created_at=lab.created_at,
+            )
+        )
+    return out
 
 
 async def _next_registration_number(db: AsyncSession, scheme: SchemeDB) -> str:

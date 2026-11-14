@@ -227,21 +227,13 @@ async def apply_for_ptcycle(
             status_code=400, detail="This PT Cycle is not open for enrolment yet"
         )
 
-    if ptcycle.pt_cyle_status_id not in assist.PT_CYCLE_ENROLLMENT_OPEN:
-        current_name = assist.PT_CYCLE_STATUS_NAMES.get(
-            ptcycle.pt_cyle_status_id, ptcycle.pt_cyle_status_id
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=f"This PT Cycle is '{current_name}' and is not open for enrolment",
-        )
-
-    if ptcycle.closing_date and ptcycle.closing_date < assist.get_current_date().date():
+    # enrolment window is derived live from the cycle's dates
+    if not assist.pt_enrollment_open(ptcycle):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Enrolment for this PT Cycle closed on "
-                f"{ptcycle.closing_date:%d %b %Y}"
+                "This PT Cycle is not open for enrolment. Enrolment runs from "
+                f"{ptcycle.effective_date:%d %b %Y} to {ptcycle.closing_date:%d %b %Y}."
             ),
         )
 

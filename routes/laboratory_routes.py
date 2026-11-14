@@ -4,14 +4,17 @@ from sqlalchemy.future import select
 from sqlalchemy import text
 from typing import List, Optional
 from database import get_db
-from helpers.auth import get_current_user, CurrentUser
+from helpers.auth import get_current_user, require_user, CurrentUser
 from models.laboratory_model import (
     Laboratory,
     LaboratoryDB,
     LaboratoryWithDetail,
     LaboratoryWithSchemes,
     ParamLaboratoryEdit,
+    ParamPaymentProof,
 )
+from models.scheme_model import SchemeDB
+from models.attachment_model import AttachmentDB
 # approval
 from models.stage_model import Stage
 from models.status_model import Status
@@ -334,6 +337,26 @@ async def review_posting(
 
     laboratory.updated_by = user.email
 
+    # who may act depends on the stage: the usual scheme approvers at every
+    # review stage, plus the Finance role once proof of payment is in. While the
+    # registration is waiting for the applicant's payment, nobody approves it.
+    if laboratory.stage_id == assist.APPROVAL_STAGE_AWAITING_PAYMENT:
+        raise HTTPException(
+            status_code=400,
+            detail="This registration is awaiting proof of payment from the applicant",
+        )
+    if laboratory.stage_id == assist.APPROVAL_STAGE_PAYMENT_REVIEW:
+        if not assist.is_payment_approver(user.role_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only a scheme approver or the Finance role may approve at the payment stage",
+            )
+    elif not assist.is_admin_role(user.role_id):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not permitted to review laboratory registrations",
+        )
+
     approveLaboratory = False
 
     if laboratory.stage_id == assist.APPROVAL_STAGE_SUBMITTED:
@@ -353,6 +376,12 @@ async def review_posting(
             # reject
 
             laboratory.status_id = assist.STATUS_REJECTED
+        elif review.payment_required:
+            # the approver requires payment before this is finalised: resolve the
+            # amount due and hand the registration back to the applicant to
+            # attach proof (see /laboratorys/payment-proof)
+            await _require_payment(db, laboratory)
+
         else:
             # approve
 
@@ -367,6 +396,18 @@ async def review_posting(
                 # two or three levels, move to primary
 
                 laboratory.stage_id = assist.APPROVAL_STAGE_PRIMARY
+
+    elif laboratory.stage_id == assist.APPROVAL_STAGE_PAYMENT_REVIEW:
+        # proof of payment is in; this is the final decision (scheme approver or
+        # Finance). The payment review is recorded in the second review slot.
+        laboratory.review2_at = assist.get_current_date(False)
+        laboratory.review2_by = user.email
+        laboratory.review2_comments = review.comments
+
+        if review.review_action == assist.REVIEW_ACTION_REJECT:
+            laboratory.status_id = assist.STATUS_REJECTED
+        else:
+            approveLaboratory = True
 
     elif laboratory.stage_id == assist.APPROVAL_STAGE_PRIMARY:
         # primary stage
@@ -531,3 +572,108 @@ async def _set_application_status(
         application.updated_by = user.email
         if application.user_id is None:
             application.user_id = user.id
+
+
+async def _require_payment(db: AsyncSession, laboratory: LaboratoryDB):
+    """Mark a registration as requiring payment and hand it to the applicant.
+
+    The amount due is resolved from the scheme's fee and whether the lab is
+    local (a Zambian MFL facility, charged in ZMW) or international (USD). The
+    registration moves to the Awaiting Payment stage; it is not approved until
+    the applicant attaches proof and it comes back for a final decision.
+    """
+    scheme = None
+    scheme_id = None
+    if laboratory.method_list:
+        scheme_id = laboratory.method_list[0].get("scheme_id")
+    if scheme_id:
+        scheme = (
+            await db.execute(select(SchemeDB).where(SchemeDB.id == scheme_id))
+        ).scalars().first()
+
+    is_local = laboratory.facility_id is not None
+    if is_local:
+        laboratory.payment_currency = "ZMW"
+        laboratory.payment_amount = scheme.registration_fee_zmw if scheme else None
+    else:
+        laboratory.payment_currency = "USD"
+        laboratory.payment_amount = scheme.registration_fee_usd if scheme else None
+
+    laboratory.payment_required = True
+    laboratory.payment_proof_attachment_id = None
+    laboratory.payment_submitted_at = None
+    laboratory.stage_id = assist.APPROVAL_STAGE_AWAITING_PAYMENT
+    # in progress, not a final state: the applicant must act next
+    laboratory.status_id = assist.STATUS_UNDER_REVIEW
+
+
+@router.put("/payment-proof/{id}", response_model=Laboratory)
+async def submit_payment_proof(
+    id: int,
+    payload: ParamPaymentProof,
+    db: AsyncSession = Depends(get_db),
+    caller: CurrentUser = Depends(require_user),
+):
+    """The applicant attaches proof of payment, sending the registration back
+    for a final approval."""
+    result = await db.execute(select(LaboratoryDB).where(LaboratoryDB.id == id))
+    laboratory = result.scalar_one_or_none()
+    if not laboratory:
+        raise HTTPException(status_code=404, detail=f"Unable to find Laboratory with id '{id}'")
+
+    # only the applicant who lodged it (or an administrator) may attach proof
+    email = payload.user_email.lower().strip()
+    is_owner = (
+        laboratory.registered_by_user_id == caller.id
+        or (laboratory.created_by or "").lower() == email
+    )
+    if not (is_owner or assist.is_admin_role(caller.role_id)):
+        raise HTTPException(status_code=403, detail="You cannot submit payment for this registration")
+
+    if laboratory.stage_id != assist.APPROVAL_STAGE_AWAITING_PAYMENT:
+        raise HTTPException(
+            status_code=400,
+            detail="This registration is not awaiting proof of payment",
+        )
+
+    attachment = (
+        await db.execute(select(AttachmentDB).where(AttachmentDB.id == payload.attachment_id))
+    ).scalars().first()
+    if not attachment:
+        raise HTTPException(status_code=400, detail="The proof of payment attachment was not found")
+
+    laboratory.payment_proof_attachment_id = payload.attachment_id
+    laboratory.payment_reference = payload.reference
+    laboratory.payment_submitted_at = assist.get_current_date(False)
+    # back for a final decision
+    laboratory.stage_id = assist.APPROVAL_STAGE_PAYMENT_REVIEW
+    laboratory.status_id = assist.STATUS_SUBMITTED
+    laboratory.updated_by = email
+
+    try:
+        await db.commit()
+        await db.refresh(laboratory)
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not submit payment proof: {e}")
+    return laboratory
+
+
+@router.get("/payment-list", response_model=List[LaboratoryWithDetail])
+async def list_payment_registrations(
+    db: AsyncSession = Depends(get_db),
+    user: Optional[CurrentUser] = Depends(get_current_user),
+):
+    """Registrations in the payment part of the workflow (awaiting payment or
+    awaiting the final payment approval). Used by the scheme approvers and the
+    Finance role; scoped to a scheme-team member's own scheme."""
+    query = _scope_to_scheme(
+        _laboratory_query().where(
+            LaboratoryDB.stage_id.in_(
+                [assist.APPROVAL_STAGE_AWAITING_PAYMENT, assist.APPROVAL_STAGE_PAYMENT_REVIEW]
+            )
+        ),
+        user,
+    )
+    result = await db.execute(query)
+    return result.scalars().all()

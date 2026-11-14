@@ -26,6 +26,12 @@ async def post_scheme(scheme: Scheme, db: AsyncSession = Depends(get_db), _admin
         # update
         name=scheme.name,
         description=scheme.description,
+        # registration payment configuration
+        registration_fee_usd=scheme.registration_fee_usd,
+        registration_fee_zmw=scheme.registration_fee_zmw,
+        bank_account_details=scheme.bank_account_details,
+        mobile_money_details=scheme.mobile_money_details,
+        payment_instructions=scheme.payment_instructions,
         # properties
         provider_id=scheme.provider_id,
         # approval

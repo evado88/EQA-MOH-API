@@ -42,6 +42,20 @@ from models.method_model import (
     RESULT_FORM_BACTERIOLOGY,
 )
 from models.enrollment_model import EnrollmentDB
+from models.attachment_model import Attachment, AttachmentDB
+from models.ptcycle_model import (
+    ParamPTCycleSave,
+    ParamPTCycleAction,
+    PTCycleReminderResult,
+    ParamPTCycleExtend,
+    PTCycleExtension,
+    PTCycleExtensionDB,
+    PTCycleExtendResult,
+    EXTENDABLE_DATE_FIELDS,
+)
+from helpers import mailer
+from datetime import timedelta
+from sqlalchemy import text
 
 router = APIRouter(prefix="/pt-cycles", tags=["PTCycles"])
 
@@ -56,37 +70,142 @@ RESULT_MODEL_BY_FORM = {
 }
 
 
-@router.post("/create", response_model=PTCycle)
-async def post_ptcycle(ptcycle: PTCycle, db: AsyncSession = Depends(get_db)):
-    """Opens a PT Cycle.
+def _recompute_status(ptcycle: PTCycleDB):
+    """Refresh the cached lifecycle status from the cycle's dates and gates."""
+    ptcycle.pt_cyle_status_id = assist.compute_pt_cycle_status(ptcycle)
 
-    The status is not the caller's to choose. Every cycle begins Upcoming and
-    moves forward one step at a time through /pt-cycles/status/{id} - each step
-    does something (enrolment opens, panels ship, results are scored), so a
-    cycle created directly as 'Samples Shipped' would be one whose panels were
-    never shipped.
+
+async def _reuse_participants(db: AsyncSession, ptcycle: PTCycleDB, source_id: int, user: UserDB):
+    """Copy every accepted participant of an earlier round of the same scheme
+    into this one, enrolled and accepted, and tell each lab by email.
+
+    Returns the number of laboratories carried over.
     """
+    source = (
+        await db.execute(select(PTCycleDB).where(PTCycleDB.id == source_id))
+    ).scalars().first()
+    if not source:
+        raise HTTPException(status_code=400, detail="The round to reuse participants from was not found")
+    if source.scheme_id != ptcycle.scheme_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Participants can only be reused from a round of the same scheme",
+        )
+
+    source_enrollments = (
+        await db.execute(
+            select(EnrollmentDB).where(
+                EnrollmentDB.pt_cycle_id == source_id,
+                EnrollmentDB.status_id == assist.STATUS_APPROVED,
+            )
+        )
+    ).scalars().all()
+
+    lab_ids = set()
+    for src in source_enrollments:
+        db.add(
+            EnrollmentDB(
+                name=f"{ptcycle.name} - reused",
+                description="Carried over from a previous round",
+                scheme_id=src.scheme_id,
+                lab_id=src.lab_id,
+                service_id=src.service_id,
+                method_id=src.method_id,
+                pt_cycle_id=ptcycle.id,
+                user_id=user.id,
+                # reused participants are enrolled and accepted straight away
+                status_id=assist.STATUS_APPROVED,
+                stage_id=assist.APPROVAL_STAGE_APPROVED,
+                approval_levels=1,
+                created_by=user.email,
+            )
+        )
+        lab_ids.add(src.lab_id)
+
+    # email each carried-over laboratory
+    if lab_ids:
+        labs = (
+            await db.execute(
+                select(LaboratoryDB.name, LaboratoryDB.email_address).where(
+                    LaboratoryDB.id.in_(lab_ids)
+                )
+            )
+        ).all()
+        for name, email in labs:
+            if not email:
+                continue
+            try:
+                await mailer.send_email(
+                    email,
+                    f"You have been enrolled in {ptcycle.name}",
+                    (
+                        f"Dear {name},\n\n"
+                        f"Your laboratory has been automatically enrolled in the new "
+                        f"round '{ptcycle.name}', carried over from a previous round. "
+                        f"No action is needed to enrol.\n\n"
+                        f"Enrollment opens {ptcycle.effective_date:%d %b %Y}; results "
+                        f"are due {ptcycle.result_submission_due_date:%d %b %Y}.\n"
+                    ),
+                    f"<p>Dear {name},</p><p>Your laboratory has been automatically "
+                    f"enrolled in the new round <strong>{ptcycle.name}</strong>, carried "
+                    f"over from a previous round. No action is needed to enrol.</p>",
+                )
+            except Exception as e:  # pragma: no cover - mail server dependent
+                print(f"[pt-cycle reuse] could not email {email}: {e}")
+
+    return len(lab_ids)
+
+
+@router.post("/create", response_model=PTCycle)
+async def post_ptcycle(param: ParamPTCycleSave, db: AsyncSession = Depends(get_db)):
+    """Opens a PT Cycle from its schedule of dates.
+
+    The lifecycle status is derived from the dates, not chosen here. The cycle
+    still goes through the normal approval before it can run. Optionally reuses
+    all accepted participants from an earlier round of the same scheme.
+    """
+    scheme = (
+        await db.execute(select(SchemeDB).where(SchemeDB.id == param.scheme_id))
+    ).scalars().first()
+    if not scheme:
+        raise HTTPException(status_code=400, detail="The selected scheme was not found")
+
+    user = await _get_admin_user(db, param.user_id)
+
     db_context = PTCycleDB(
-        # update
-        name=ptcycle.name,
-        description=ptcycle.description,
-        # properties
-        code=ptcycle.code,
-        scheme_id=ptcycle.scheme_id,
-        effective_date=ptcycle.effective_date,
-        pt_cyle_status_id=assist.PT_CYCLE_UPCOMING,
-        closing_date=ptcycle.closing_date,
-        shipping_date=ptcycle.shipping_date,
-        reports_availability_date=ptcycle.reports_availability_date,
-        # approval
-        user_id=ptcycle.user_id,
-        status_id=ptcycle.status_id,
-        stage_id=ptcycle.stage_id,
-        approval_levels=ptcycle.approval_levels,
-        # service
-        created_by=ptcycle.created_by,
+        name=f"{scheme.name} - {param.code}",
+        description=param.notes,
+        notes=param.notes,
+        code=param.code,
+        scheme_id=param.scheme_id,
+        effective_date=param.effective_date,
+        closing_date=param.closing_date,
+        shipping_date=param.shipping_date,
+        test_event_start_date=param.test_event_start_date,
+        test_event_stop_date=param.test_event_stop_date,
+        result_submission_due_date=param.result_submission_due_date,
+        reports_availability_date=param.reports_availability_date,
+        samples_shipped=False,
+        reports_published=False,
+        # approval: a new cycle is submitted for review, like before
+        user_id=param.user_id,
+        status_id=assist.STATUS_SUBMITTED,
+        stage_id=assist.APPROVAL_STAGE_SUBMITTED,
+        approval_levels=1,
+        created_by=user.email,
     )
+    _recompute_status(db_context)
     db.add(db_context)
+
+    try:
+        await db.flush()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not create PT Cycle: {e}")
+
+    if param.reuse_from_pt_cycle_id:
+        await _reuse_participants(db, db_context, param.reuse_from_pt_cycle_id, user)
+
     try:
         await db.commit()
         await db.refresh(db_context)
@@ -153,7 +272,7 @@ async def list_ptcycles(
 
 @router.put("/update/{id}", response_model=PTCycle)
 async def update_ptcycle(
-    id: int, ptcycle_update: PTCycle, db: AsyncSession = Depends(get_db)
+    id: int, param: ParamPTCycleSave, db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
     ptcycle = result.scalar_one_or_none()
@@ -164,27 +283,27 @@ async def update_ptcycle(
             detail=f"Unable to find PT Cycle with id '{id}'",
         )
 
-    changes = ptcycle_update.dict(exclude_unset=True)
+    scheme = (
+        await db.execute(select(SchemeDB).where(SchemeDB.id == param.scheme_id))
+    ).scalars().first()
 
-    # the status belongs to the transition endpoint, which checks the move is
-    # a legal one and carries out what the step actually does. Letting an edit
-    # set it would skip both, so say so rather than quietly dropping it.
-    requested_status = changes.pop("pt_cyle_status_id", None)
-    if requested_status is not None and requested_status != ptcycle.pt_cyle_status_id:
-        current = assist.PT_CYCLE_STATUS_NAMES.get(
-            ptcycle.pt_cyle_status_id, ptcycle.pt_cyle_status_id
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"The PT Cycle status cannot be changed here. It is '{current}'; "
-                "move it on from the PT Cycle page, which applies each step in turn"
-            ),
-        )
+    # the schedule of dates and the notes are editable; the lifecycle status is
+    # derived and the manual gates are moved from their own actions
+    ptcycle.scheme_id = param.scheme_id
+    ptcycle.code = param.code
+    ptcycle.name = f"{scheme.name} - {param.code}" if scheme else ptcycle.name
+    ptcycle.effective_date = param.effective_date
+    ptcycle.closing_date = param.closing_date
+    ptcycle.shipping_date = param.shipping_date
+    ptcycle.test_event_start_date = param.test_event_start_date
+    ptcycle.test_event_stop_date = param.test_event_stop_date
+    ptcycle.result_submission_due_date = param.result_submission_due_date
+    ptcycle.reports_availability_date = param.reports_availability_date
+    ptcycle.notes = param.notes
+    ptcycle.description = param.notes
+    ptcycle.updated_by = (await _get_admin_user(db, param.user_id)).email
 
-    # Update fields that are not None
-    for key, value in changes.items():
-        setattr(ptcycle, key, value)
+    _recompute_status(ptcycle)
 
     try:
         await db.commit()
@@ -195,76 +314,38 @@ async def update_ptcycle(
     return ptcycle
 
 
-@router.put("/status/{id}", response_model=PTCycleStatusChangeResult)
-async def change_ptcycle_status(
-    id: int, change: ParamPTCycleStatusChange, db: AsyncSession = Depends(get_db)
+@router.put("/samples-shipped/{id}", response_model=PTCycleStatusChangeResult)
+async def ship_ptcycle_samples(
+    id: int, change: ParamPTCycleAction, db: AsyncSession = Depends(get_db)
 ):
-    """Moves a PT cycle to its next status.
+    """Marks a cycle's samples as shipped - the one manual step before testing.
 
-    The cycle life cycle is Upcoming -> Started -> Samples Shipped ->
-    Report Available -> Closed, and it only ever moves forward one step at a
-    time. Shipping the samples is the step that has a side effect: it opens a
-    result sheet for every sample in every accepted enrolment.
+    This opens a result sheet for every sample in every accepted enrolment, and
+    moves the derived status into the post-shipping phases.
     """
     result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
     ptcycle = result.scalar_one_or_none()
-
     if not ptcycle:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unable to find PT Cycle with id '{id}'",
-        )
+        raise HTTPException(status_code=404, detail=f"Unable to find PT Cycle with id '{id}'")
 
     user = await _get_admin_user(db, change.user_id)
 
-    current_status = ptcycle.pt_cyle_status_id
-    next_status = change.pt_cyle_status_id
-
-    if current_status == next_status:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The PT Cycle is already "
-                f"'{assist.PT_CYCLE_STATUS_NAMES.get(next_status, next_status)}'"
-            ),
-        )
-
-    allowed = assist.PT_CYCLE_TRANSITIONS.get(current_status, ())
-    if next_status not in allowed:
-        current_name = assist.PT_CYCLE_STATUS_NAMES.get(current_status, current_status)
-        next_name = assist.PT_CYCLE_STATUS_NAMES.get(next_status, next_status)
-        allowed_names = [assist.PT_CYCLE_STATUS_NAMES[value] for value in allowed]
-        detail = (
-            f"A PT Cycle that is '{current_name}' cannot be moved to '{next_name}'"
-        )
-        if allowed_names:
-            detail += f". It can only be moved to {', '.join(allowed_names)}"
-        else:
-            detail += " because the cycle is complete"
-        raise HTTPException(status_code=400, detail=detail)
-
-    # a cycle has to be approved before it can be run
     if ptcycle.status_id != assist.STATUS_APPROVED:
         raise HTTPException(
             status_code=400,
-            detail="The PT Cycle must be approved before its status can be changed",
+            detail="The PT Cycle must be approved before samples can be shipped",
         )
+    if ptcycle.samples_shipped:
+        raise HTTPException(status_code=400, detail="This PT Cycle's samples are already shipped")
 
-    enrollment_count = 0
-    result_count = 0
-    evaluated = None
+    enrollment_count, result_count = await _ship_samples(db, ptcycle, user)
 
-    if next_status == assist.PT_CYCLE_SAMPLES_SHIPPED:
-        enrollment_count, result_count = await _ship_samples(db, ptcycle, user)
-
-    if next_status == assist.PT_CYCLE_REPORT_AVAILABLE:
-        # score the round and freeze what it concluded; a report issued now
-        # must still say the same thing if it is re-run next year
-        if not await evaluation.cycle_is_evaluated(db, ptcycle):
-            evaluated = await evaluation.evaluate_cycle(db, ptcycle, user)
-
-    ptcycle.pt_cyle_status_id = next_status
+    ptcycle.samples_shipped = True
+    ptcycle.samples_shipped_at = assist.get_current_date(False)
+    if not ptcycle.shipping_date:
+        ptcycle.shipping_date = assist.get_current_date().date()
     ptcycle.updated_by = user.email
+    _recompute_status(ptcycle)
 
     try:
         await db.commit()
@@ -272,37 +353,356 @@ async def change_ptcycle_status(
         await db.rollback()
         raise HTTPException(status_code=400, detail=f"Unable to update PT Cycle {e}")
 
-    next_name = assist.PT_CYCLE_STATUS_NAMES.get(next_status, next_status)
-    message = f"The PT Cycle is now '{next_name}'"
-    if next_status == assist.PT_CYCLE_SAMPLES_SHIPPED:
-        message += (
-            f". {result_count} result sheet(s) were opened across "
-            f"{enrollment_count} enrolment(s)"
+    return PTCycleStatusChangeResult(
+        succeeded=True,
+        message=(
+            f"Samples marked shipped. {result_count} result sheet(s) were opened "
+            f"across {enrollment_count} enrolment(s)."
+        ),
+        pt_cycle_id=ptcycle.id,
+        pt_cyle_status_id=ptcycle.pt_cyle_status_id,
+        enrollment_count=enrollment_count,
+        result_count=result_count,
+    )
+
+
+@router.put("/publish-reports/{id}", response_model=PTCycleStatusChangeResult)
+async def publish_ptcycle_reports(
+    id: int, change: ParamPTCycleAction, db: AsyncSession = Depends(get_db)
+):
+    """Scores the round and makes its reports available - the final manual step.
+
+    Scoring is frozen at publication, so a report issued now still says the same
+    thing if the round is re-run later.
+    """
+    result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
+    ptcycle = result.scalar_one_or_none()
+    if not ptcycle:
+        raise HTTPException(status_code=404, detail=f"Unable to find PT Cycle with id '{id}'")
+
+    user = await _get_admin_user(db, change.user_id)
+
+    if not ptcycle.samples_shipped:
+        raise HTTPException(
+            status_code=400,
+            detail="Samples must be shipped before reports can be published",
         )
+    if ptcycle.reports_published:
+        raise HTTPException(status_code=400, detail="This PT Cycle's reports are already published")
+
+    evaluated = None
+    if not await evaluation.cycle_is_evaluated(db, ptcycle):
+        evaluated = await evaluation.evaluate_cycle(db, ptcycle, user)
+
+    ptcycle.reports_published = True
+    ptcycle.reports_published_at = assist.get_current_date(False)
+    ptcycle.updated_by = user.email
+    _recompute_status(ptcycle)
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Unable to update PT Cycle {e}")
+
+    message = "Reports published and now available to the laboratories."
     if evaluated:
         stats, evals, performances = evaluated
         message += (
-            f". {evals} result(s) were scored against {stats} sample "
-            f"statistic(s), giving {performances} participant report(s)"
+            f" {evals} result(s) were scored against {stats} sample statistic(s), "
+            f"giving {performances} participant report(s)."
         )
 
     return PTCycleStatusChangeResult(
         succeeded=True,
         message=message,
         pt_cycle_id=ptcycle.id,
-        pt_cyle_status_id=next_status,
-        enrollment_count=enrollment_count,
-        result_count=result_count,
+        pt_cyle_status_id=ptcycle.pt_cyle_status_id,
     )
 
 
-@router.put("/samples-shipped/{id}", response_model=PTCycleStatusChangeResult)
-async def ship_ptcycle_samples(
-    id: int, change: ParamPTCycleStatusChange, db: AsyncSession = Depends(get_db)
+# --------------------------------------------------------------------------
+# Documents and reminders
+# --------------------------------------------------------------------------
+@router.put("/extend/{id}", response_model=PTCycleExtendResult)
+async def extend_ptcycle_date(
+    id: int, param: ParamPTCycleExtend, db: AsyncSession = Depends(get_db)
 ):
-    """Shorthand for moving a cycle to 'Samples Shipped'"""
-    change.pt_cyle_status_id = assist.PT_CYCLE_SAMPLES_SHIPPED
-    return await change_ptcycle_status(id, change, db)
+    """Extend a round's enrollment closing or result submission due date.
+
+    Moving the date forward re-opens the window (gating is derived live from the
+    dates). Every enrolled laboratory is notified - including those that have
+    already finished - and the change is written to the extension audit trail.
+    """
+    result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
+    ptcycle = result.scalar_one_or_none()
+    if not ptcycle:
+        raise HTTPException(status_code=404, detail=f"Unable to find PT Cycle with id '{id}'")
+
+    user = await _get_admin_user(db, param.user_id)
+
+    label = EXTENDABLE_DATE_FIELDS.get(param.field)
+    if not label:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only these dates can be extended: {', '.join(EXTENDABLE_DATE_FIELDS)}",
+        )
+    if ptcycle.status_id != assist.STATUS_APPROVED:
+        raise HTTPException(status_code=400, detail="The PT Cycle must be approved first")
+    if ptcycle.reports_published:
+        raise HTTPException(
+            status_code=400,
+            detail="Reports are already published, so dates can no longer be extended",
+        )
+
+    old = getattr(ptcycle, param.field)
+    new = param.new_date
+    if old and new <= old:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The new date must be later than the current one ({old:%d %b %Y})",
+        )
+
+    # keep the schedule in order
+    if param.field == "closing_date":
+        if ptcycle.effective_date and new < ptcycle.effective_date:
+            raise HTTPException(status_code=400, detail="Closing cannot be before enrollment opens")
+        if ptcycle.shipping_date and new > ptcycle.shipping_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Closing cannot be after the sample shipping date - adjust shipping first",
+            )
+    else:  # result_submission_due_date
+        if ptcycle.test_event_stop_date and new < ptcycle.test_event_stop_date:
+            raise HTTPException(status_code=400, detail="The due date cannot be before the test event ends")
+        if ptcycle.reports_availability_date and new > ptcycle.reports_availability_date:
+            raise HTTPException(
+                status_code=400,
+                detail="The due date cannot be after the report availability date - adjust that first",
+            )
+
+    setattr(ptcycle, param.field, new)
+    ptcycle.updated_by = user.email
+    _recompute_status(ptcycle)
+
+    # notify every enrolled laboratory, finished or not
+    rows = (
+        await db.execute(
+            text(
+                "SELECT DISTINCT l.name, l.email_address FROM laboratorys l "
+                "JOIN enrollments e ON e.lab_id = l.id "
+                "WHERE e.pt_cycle_id = :c AND l.email_address IS NOT NULL"
+            ),
+            {"c": ptcycle.id},
+        )
+    ).all()
+    recipients = [(r[0], r[1]) for r in rows if r[1]]
+    await _notify_extension(ptcycle, label, old, new, param.reason, recipients)
+
+    db.add(
+        PTCycleExtensionDB(
+            pt_cycle_id=ptcycle.id,
+            field=param.field,
+            field_label=label,
+            old_value=old,
+            new_value=new,
+            reason=param.reason,
+            recipients_notified=len(recipients),
+            extended_by=user.email,
+        )
+    )
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not extend the date: {e}")
+
+    return PTCycleExtendResult(
+        succeeded=True,
+        message=(
+            f"{label} extended to {new:%d %b %Y}. {len(recipients)} laboratory(ies) "
+            f"were notified."
+        ),
+        pt_cycle_id=ptcycle.id,
+        field=param.field,
+        new_date=new,
+        recipients_notified=len(recipients),
+    )
+
+
+async def _notify_extension(cycle, label, old, new, reason, recipients):
+    old_text = f"{old:%d %b %Y}" if old else "(not set)"
+    reason_text = f"\n\nReason: {reason}" if reason else ""
+    subject = f"Date extended: {cycle.name}"
+    for name, email in recipients:
+        try:
+            await mailer.send_email(
+                email,
+                subject,
+                (
+                    f"Dear {name},\n\n"
+                    f"For the round '{cycle.name}', the {label} has been extended "
+                    f"from {old_text} to {new:%d %b %Y}.{reason_text}\n\n"
+                    f"If you have already completed your tasks, no further action is "
+                    f"needed.\n"
+                ),
+                f"<p>Dear {name},</p><p>For the round <strong>{cycle.name}</strong>, "
+                f"the <strong>{label}</strong> has been extended from {old_text} to "
+                f"<strong>{new:%d %b %Y}</strong>.{('<br>Reason: ' + reason) if reason else ''}</p>"
+                f"<p>If you have already completed your tasks, no further action is needed.</p>",
+            )
+        except Exception as e:  # pragma: no cover - mail server dependent
+            print(f"[pt-cycle extension] could not email {email}: {e}")
+
+
+@router.get("/extensions/{id}", response_model=List[PTCycleExtension])
+async def list_ptcycle_extensions(id: int, db: AsyncSession = Depends(get_db)):
+    """The audit trail of date extensions for a round, newest first."""
+    result = await db.execute(
+        select(PTCycleExtensionDB)
+        .where(PTCycleExtensionDB.pt_cycle_id == id)
+        .order_by(PTCycleExtensionDB.extended_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/documents/{id}", response_model=List[Attachment])
+async def list_ptcycle_documents(id: int, db: AsyncSession = Depends(get_db)):
+    """Documents attached to a round (instructions, resources). Uploaded via
+    /attachments/create/type/PTCycleDocument/parent/{id}."""
+    result = await db.execute(
+        select(AttachmentDB)
+        .where(AttachmentDB.type == "PTCycleDocument", AttachmentDB.parent == id)
+        .order_by(AttachmentDB.id)
+    )
+    return result.scalars().all()
+
+
+async def run_pt_cycle_reminders(db: AsyncSession):
+    """Send any date reminders that fall due today, and refresh cached statuses.
+
+    Idempotent: each (cycle, date, lead) reminder is recorded once in
+    pt_cycle_reminders and never sent again. Enrolment-opening reminders go to
+    every approved lab in the scheme; all other dates go to the enrolled labs.
+    """
+    today = assist.get_current_date().date()
+    details = []
+    sent = 0
+
+    cycles = (
+        await db.execute(
+            select(PTCycleDB).where(PTCycleDB.status_id == assist.STATUS_APPROVED)
+        )
+    ).scalars().all()
+
+    for cycle in cycles:
+        # keep the cached status fresh while we are here
+        new_status = assist.compute_pt_cycle_status(cycle, today)
+        if cycle.pt_cyle_status_id != new_status:
+            cycle.pt_cyle_status_id = new_status
+
+        for field in assist.PT_CYCLE_REMINDER_FIELDS:
+            when = getattr(cycle, field, None)
+            if not when:
+                continue
+            for lead in assist.PT_CYCLE_REMINDER_LEAD_DAYS:
+                if when - timedelta(days=lead) != today:
+                    continue
+                key = f"{field}:{lead}"
+                already = (
+                    await db.execute(
+                        text(
+                            "SELECT 1 FROM pt_cycle_reminders "
+                            "WHERE pt_cycle_id=:c AND reminder_key=:k"
+                        ),
+                        {"c": cycle.id, "k": key},
+                    )
+                ).first()
+                if already:
+                    continue
+
+                recipients = await _reminder_recipients(db, cycle, field)
+                await _send_reminders(cycle, field, lead, when, recipients)
+                await db.execute(
+                    text(
+                        "INSERT INTO pt_cycle_reminders (pt_cycle_id, reminder_key, recipients) "
+                        "VALUES (:c, :k, :n)"
+                    ),
+                    {"c": cycle.id, "k": key, "n": len(recipients)},
+                )
+                sent += 1
+                details.append(f"{cycle.name}: {field} (-{lead}d) -> {len(recipients)} lab(s)")
+
+    await db.commit()
+    return PTCycleReminderResult(
+        succeeded=True, cycles_checked=len(cycles), reminders_sent=sent, details=details
+    )
+
+
+async def _reminder_recipients(db: AsyncSession, cycle: PTCycleDB, field: str):
+    """Email addresses to remind for a given date field."""
+    if field == "effective_date":
+        # enrolment opening: every approved lab in the scheme (they can't enrol yet)
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT l.email_address FROM laboratorys l "
+                    "JOIN applications a ON a.lab_id = l.id "
+                    "WHERE a.scheme_id = :s AND a.status_id = :approved "
+                    "AND l.email_address IS NOT NULL"
+                ),
+                {"s": cycle.scheme_id, "approved": assist.STATUS_APPROVED},
+            )
+        ).all()
+    else:
+        # everything else: the labs enrolled in this cycle
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT l.email_address FROM laboratorys l "
+                    "JOIN enrollments e ON e.lab_id = l.id "
+                    "WHERE e.pt_cycle_id = :c AND l.email_address IS NOT NULL"
+                ),
+                {"c": cycle.id},
+            )
+        ).all()
+    return [r[0] for r in rows if r[0]]
+
+
+_REMINDER_LABELS = {
+    "effective_date": "enrollment opens",
+    "closing_date": "enrollment closes",
+    "shipping_date": "samples ship",
+    "test_event_start_date": "the test event starts",
+    "result_submission_due_date": "results are due",
+    "reports_availability_date": "reports become available",
+}
+
+
+async def _send_reminders(cycle, field, lead, when, recipients):
+    label = _REMINDER_LABELS.get(field, field)
+    subject = f"Reminder: {cycle.name} - {label} on {when:%d %b %Y}"
+    for email in recipients:
+        try:
+            await mailer.send_email(
+                email,
+                subject,
+                (
+                    f"This is a reminder that for the round '{cycle.name}', "
+                    f"{label} on {when:%d %b %Y} ({lead} day(s) from now).\n"
+                ),
+                f"<p>This is a reminder that for the round <strong>{cycle.name}</strong>, "
+                f"{label} on <strong>{when:%d %b %Y}</strong> ({lead} day(s) from now).</p>",
+            )
+        except Exception as e:  # pragma: no cover - mail server dependent
+            print(f"[pt-cycle reminder] could not email {email}: {e}")
+
+
+@router.post("/run-reminders", response_model=PTCycleReminderResult)
+async def trigger_pt_cycle_reminders(db: AsyncSession = Depends(get_db)):
+    """Send due reminders now. Also run daily by the in-app scheduler."""
+    return await run_pt_cycle_reminders(db)
 
 
 @router.get("/open/{lab_id}", response_model=List[PTCycleWithDetail])
@@ -329,13 +729,16 @@ async def list_open_ptcycles(lab_id: int, db: AsyncSession = Depends(get_db)):
     )
     enrolled_cycle_ids = {value for value in result.scalars().all()}
 
+    today = assist.get_current_date().date()
     query = (
         _ptcycle_query()
         .where(
             PTCycleDB.scheme_id.in_(scheme_ids),
             PTCycleDB.status_id == assist.STATUS_APPROVED,
-            PTCycleDB.pt_cyle_status_id.in_(assist.PT_CYCLE_ENROLLMENT_OPEN),
-            PTCycleDB.closing_date >= assist.get_current_date().date(),
+            # enrolment is open (live from dates): opened, not yet closed, not shipped
+            PTCycleDB.samples_shipped == False,
+            PTCycleDB.effective_date <= today,
+            PTCycleDB.closing_date >= today,
         )
         .order_by(PTCycleDB.closing_date)
     )

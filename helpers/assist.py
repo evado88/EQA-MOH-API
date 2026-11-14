@@ -76,36 +76,97 @@ ADMIN_ROLES = (
     ROLE_MINISTRY_OF_HEALTH,
 )
 
-# pt cycle statuses - must match the order of the list seeded by
-# /pt-cycle-statuses/initialize
+# pt cycle statuses - must match the order seeded in pt_cycle_statuses
+# (migration 019). The status is DERIVED from the cycle's dates and its two
+# manual gates (samples_shipped, reports_published); see compute_pt_cycle_status.
 PT_CYCLE_UPCOMING = 1
-PT_CYCLE_STARTED = 2
-PT_CYCLE_SAMPLES_SHIPPED = 3
-PT_CYCLE_REPORT_AVAILABLE = 4
-PT_CYCLE_CLOSED = 5
+PT_CYCLE_ENROLMENT_OPEN = 2
+PT_CYCLE_ENROLMENT_CLOSED = 3
+PT_CYCLE_SAMPLES_SHIPPED = 4
+PT_CYCLE_TESTING = 5
+PT_CYCLE_RESULTS_DUE = 6
+PT_CYCLE_REPORT_AVAILABLE = 7
+
+# kept so older references resolve; "Started" is now "Enrolment Open"
+PT_CYCLE_STARTED = PT_CYCLE_ENROLMENT_OPEN
 
 PT_CYCLE_STATUS_NAMES = {
     PT_CYCLE_UPCOMING: "Upcoming",
-    PT_CYCLE_STARTED: "Started",
+    PT_CYCLE_ENROLMENT_OPEN: "Enrolment Open",
+    PT_CYCLE_ENROLMENT_CLOSED: "Enrolment Closed",
     PT_CYCLE_SAMPLES_SHIPPED: "Samples Shipped",
+    PT_CYCLE_TESTING: "Testing In Progress",
+    PT_CYCLE_RESULTS_DUE: "Results Due",
     PT_CYCLE_REPORT_AVAILABLE: "Report Available",
-    PT_CYCLE_CLOSED: "Closed",
 }
 
-# the cycle life cycle only ever moves forward, one step at a time
-PT_CYCLE_TRANSITIONS = {
-    PT_CYCLE_UPCOMING: (PT_CYCLE_STARTED,),
-    PT_CYCLE_STARTED: (PT_CYCLE_SAMPLES_SHIPPED,),
-    PT_CYCLE_SAMPLES_SHIPPED: (PT_CYCLE_REPORT_AVAILABLE,),
-    PT_CYCLE_REPORT_AVAILABLE: (PT_CYCLE_CLOSED,),
-    PT_CYCLE_CLOSED: (),
-}
 
-# labs may only enrol while the cycle is accepting applications
-PT_CYCLE_ENROLLMENT_OPEN = (PT_CYCLE_STARTED,)
+def compute_pt_cycle_status(cycle, today=None):
+    """The cycle's lifecycle status, derived from its dates and manual gates.
 
-# labs may only capture results once the samples are on their way
-PT_CYCLE_RESULT_CAPTURE_OPEN = (PT_CYCLE_SAMPLES_SHIPPED,)
+    Precedence: a published report or shipped samples take over from the date-
+    driven enrolment phases, because those two steps are manual and carry side
+    effects. `cycle` is any object exposing the date fields and the two flags.
+    """
+    if today is None:
+        today = get_current_date().date()
+
+    if getattr(cycle, "reports_published", False):
+        return PT_CYCLE_REPORT_AVAILABLE
+
+    if getattr(cycle, "samples_shipped", False):
+        start = getattr(cycle, "test_event_start_date", None)
+        stop = getattr(cycle, "test_event_stop_date", None)
+        if start and today < start:
+            return PT_CYCLE_SAMPLES_SHIPPED
+        if stop and today <= stop:
+            return PT_CYCLE_TESTING
+        return PT_CYCLE_RESULTS_DUE
+
+    opening = getattr(cycle, "effective_date", None)
+    closing = getattr(cycle, "closing_date", None)
+    if opening and today < opening:
+        return PT_CYCLE_UPCOMING
+    if closing and today <= closing:
+        return PT_CYCLE_ENROLMENT_OPEN
+    return PT_CYCLE_ENROLMENT_CLOSED
+
+
+def pt_enrollment_open(cycle, today=None):
+    """Enrolment is open only during the enrolment window (before shipping)."""
+    return compute_pt_cycle_status(cycle, today) == PT_CYCLE_ENROLMENT_OPEN
+
+
+def pt_result_capture_open(cycle, today=None):
+    """Results may be captured from when samples ship until the submission due
+    date passes, and never after reports are published."""
+    if today is None:
+        today = get_current_date().date()
+    if not getattr(cycle, "samples_shipped", False):
+        return False
+    if getattr(cycle, "reports_published", False):
+        return False
+    due = getattr(cycle, "result_submission_due_date", None)
+    if due and today > due:
+        return False
+    return True
+
+
+# kept for any remaining membership-style checks
+PT_CYCLE_ENROLLMENT_OPEN = (PT_CYCLE_ENROLMENT_OPEN,)
+PT_CYCLE_RESULT_CAPTURE_OPEN = (PT_CYCLE_SAMPLES_SHIPPED, PT_CYCLE_TESTING, PT_CYCLE_RESULTS_DUE)
+
+# reminder emails: how many days before each date to remind, and which date
+# fields carry reminders (recipients decided in the reminder job)
+PT_CYCLE_REMINDER_LEAD_DAYS = (7, 1)
+PT_CYCLE_REMINDER_FIELDS = (
+    "effective_date",            # enrolment opening  -> all approved scheme labs
+    "closing_date",              # enrolment closing  -> enrolled labs
+    "shipping_date",             # sample shipping    -> enrolled labs
+    "test_event_start_date",     # test event start   -> enrolled labs
+    "result_submission_due_date",# result due         -> enrolled labs
+    "reports_availability_date", # report availability-> enrolled labs
+)
 
 
 # ---------------------------------------------------------------- evaluation
@@ -349,6 +410,21 @@ APPROVAL_STAGE_SUBMITTED = 2
 APPROVAL_STAGE_PRIMARY = 3
 APPROVAL_STAGE_SECONDARY = 4
 APPROVAL_STAGE_APPROVED = 5
+# payment step (optional): set when an approver marks payment required at the
+# first approval. The registration waits with the applicant for proof, then
+# returns for a final approval the Finance role may also give.
+APPROVAL_STAGE_AWAITING_PAYMENT = 6
+APPROVAL_STAGE_PAYMENT_REVIEW = 7
+
+# who may approve at the payment-review stage: the usual scheme administrators
+# plus the Finance Officer
+PAYMENT_APPROVER_ROLES = ADMIN_ROLES + (ROLE_FINANCE_OFFICER,)
+
+
+def is_payment_approver(role_id: int) -> bool:
+    """Returns true for a role allowed to approve a registration once proof of
+    payment has been attached (scheme administrators and Finance)."""
+    return role_id in PAYMENT_APPROVER_ROLES
 
 RESPONSE_NO = 1
 RESPONSE_YES = 2

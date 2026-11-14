@@ -17,5 +17,9 @@ class Review(BaseModel):
     content: Optional[str]
     attachment_id: Optional[int]
 
+    # set when approving a submitted registration to require payment before the
+    # final approval. Ignored on rejection and at other stages.
+    payment_required: Optional[bool] = False
+
     class Config:
         orm_mode = True
