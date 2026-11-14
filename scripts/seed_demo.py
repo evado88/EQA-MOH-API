@@ -8,7 +8,8 @@ produces.
 """
 import asyncio
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -61,7 +62,9 @@ async def reset():
         for table in ("pt_result_evaluations", "pt_enrollment_performance",
                       "pt_sample_statistics", "tb_xpert_ultra_results",
                       "tb_xpert_xdr_results", "hiv_vl_results",
-                      "hiv_eid_results", "enrollments", "applications",
+                      "hiv_eid_results", "bacteriology_ast_results",
+                      "bacteriology_results", "announcements",
+                      "enrollments", "applications",
                       "pt_cycles", "laboratorys"):
             await db.execute(text(f"TRUNCATE {table} RESTART IDENTITY CASCADE"))
 
@@ -273,6 +276,59 @@ async def catalogue():
                              method_id=method.id, user_id=1, **APPROVED)
                 sid += 1
 
+        # NHRTI runs the bacteriology scheme out of Ndola, from application
+        # form MF006 and scheme protocol TP-NHRTI-BACT-001
+        nhrti = await upsert(db, ProviderDB, {"id": 3},
+                             name="NHRTI PT Services",
+                             description="National Health Research and Training "
+                                         "Institute, Ndola",
+                             user_id=1, **APPROVED)
+
+        bact = await upsert(db, SchemeDB, {"id": 4}, name="Bacteriology",
+                            description="NHRTI-Bacteriology proficiency testing "
+                                        "scheme",
+                            provider_id=nhrti.id, user_id=1, **APPROVED)
+
+        # One worksheet covers the Gram stain, the identification and the AST,
+        # and protocol section 17.1 scores all three together out of 100, so
+        # the scheme has one service rather than one per test. What the
+        # application form ticks per test is the METHOD column: manual or
+        # automated.
+        bact_service = await upsert(db, ServiceDB, {"id": 5},
+                                    name="Bacteriology (MCS)",
+                                    description="Microscopy, Culture and "
+                                                "Sensitivity Testing",
+                                    scheme_id=bact.id, user_id=1, **APPROVED)
+
+        bact_methods = []
+        for mid, mname, mdesc in (
+            (10, "Manual", "Manual bacteriology, conventional biochemicals and "
+                           "disk diffusion"),
+            (11, "Automated", "Automated identification and susceptibility "
+                              "testing, e.g. Vitek 2"),
+        ):
+            bact_methods.append(await upsert(
+                db, MethodDB, {"id": mid}, name=mname, description=mdesc,
+                result_form="bacteriology", scheme_id=bact.id,
+                service_id=bact_service.id, user_id=1, **APPROVED))
+
+        # five swabs in Amies transport medium, as in TF-NHRTI-BACT-003
+        BACT_PANEL = [
+            ("NHRTIBACT A01-26", "Urine, pathogen identification"),
+            ("NHRTIBACT B01-26", "Peritoneal fluid, culture"),
+            ("NHRTIBACT C01-26", "High vaginal swab, culture"),
+            ("NHRTIBACT D01-26", "Wound swab, culture"),
+            ("NHRTIBACT E01-26", "Sputum, culture and AST"),
+        ]
+        for method in bact_methods:
+            for sample_name, scenario in BACT_PANEL:
+                await upsert(db, MethodSampleDB, {"id": sid},
+                             name=sample_name,
+                             description=f"{scenario} ({method.name})",
+                             scheme_id=bact.id, service_id=bact_service.id,
+                             method_id=method.id, user_id=1, **APPROVED)
+                sid += 1
+
         await db.commit()
 
         # A TB panel is manufactured, so the provider knows the answer up
@@ -300,6 +356,26 @@ async def catalogue():
             "2026-03": NOT_DETECTED,
             "2026-04": NOT_DETECTED,
             "2026-05": DETECTED,
+        }
+
+        # Protocol section 18: the bacteriology answers come from
+        # characterisation of the strains and the reference laboratories, for
+        # the AST as much as for the identification. The organisms match the
+        # clinical scenarios in TF-NHRTI-BACT-003.
+        BACT_EXPECTED = {
+            "NHRTIBACT A01-26": ("Gram negative", "Bacilli",
+                                 "Escherichia coli", None),
+            "NHRTIBACT B01-26": ("Gram positive", "Cocci",
+                                 "Staphylococcus epidermidis", None),
+            "NHRTIBACT C01-26": ("Gram positive", "Diplococci",
+                                 "Streptococcus agalactiae", None),
+            "NHRTIBACT D01-26": ("Gram positive", "Cocci",
+                                 "Staphylococcus aureus", None),
+            # sample E is the one shipped for identification and AST
+            "NHRTIBACT E01-26": ("Gram negative", "Bacilli",
+                                 "Klebsiella pneumoniae",
+                                 "AMIKACIN:S|CEFTRIAXONE:R|CIPROFLOXACIN:S|"
+                                 "GENTAMICIN:S|MEROPENEM:S"),
         }
 
         XDR_EXPECTED = [
@@ -338,6 +414,20 @@ async def catalogue():
                         method_sample_id=sample.id, attribute=attribute,
                         expected_value_text=value, created_by="demo-seed"))
 
+            elif sample.method_id in (10, 11):    # the bacteriology methods
+                sample.assigned_value_source = "predefined"
+                stain, morphology, organism, ast = BACT_EXPECTED[sample.name]
+                for attribute, value in (("gram_stain_reaction", stain),
+                                         ("gram_morphology", morphology),
+                                         ("organism_identified", organism),
+                                         ("ast_result", ast)):
+                    if not value:
+                        # only sample E is asked for AST
+                        continue
+                    db.add(MethodSampleExpectedValueDB(
+                        method_sample_id=sample.id, attribute=attribute,
+                        expected_value_text=value, created_by="demo-seed"))
+
             elif sample.method_id in (5, 6, 7):  # the viral load platforms
                 sample.assigned_value_source = "consensus"
 
@@ -364,6 +454,7 @@ async def catalogue():
     print("3. catalogue built:")
     print("     CDL / Tuberculosis (TB) / {Microscopy, Xpert} / 4 methods / 15 samples")
     print("     Virology PT / HIV-1 Viral Load- Conventional PCR / 3 methods / 15 samples")
+    print("     NHRTI PT Services / Bacteriology / 1 service / 2 methods / 10 samples")
 
 
 # --------------------------------------------------------------------------
@@ -399,6 +490,13 @@ LABS = [
      "chola.mumba@mansa.health.zm", 1, 4, 71, [8]),
     ("Mongu Provincial Hospital Lab", "Situmbeko Imwiko",
      "situmbeko.imwiko@mongu.health.zm", 1, 10, 82, [9]),
+    # and these take the NHRTI bacteriology scheme
+    ("Ndola Teaching Hospital Microbiology", "Mwila Chibesa",
+     "mwila.chibesa@ndolamicro.health.zm", 1, 2, 10, [10]),
+    ("Kitwe Teaching Hospital Microbiology", "Rachel Banda",
+     "rachel.banda@kitwemicro.health.zm", 1, 2, 4, [10, 11]),
+    ("Lusaka Trust Hospital Laboratory", "Davies Simukonda",
+     "davies.simukonda@lth.co.zm", 2, 5, 39, [11]),
 ]
 
 
@@ -955,6 +1053,145 @@ async def capture_results(c, cycle_id, users, labs, tested_on, submit=True,
          + (", all submitted results graded" if approve else ""))
 
 
+# What the NHRTI bacteriology panel should come back as, from protocol
+# TP-NHRTI-BACT-001 and the scenarios in TF-NHRTI-BACT-003:
+# stain reaction, morphology, organism, and the AST answer for sample E.
+BACT_TARGETS = {
+    "NHRTIBACT A01-26": ("Gram negative", "Bacilli", "Escherichia coli", None),
+    "NHRTIBACT B01-26": ("Gram positive", "Cocci",
+                         "Staphylococcus epidermidis", None),
+    "NHRTIBACT C01-26": ("Gram positive", "Diplococci",
+                         "Streptococcus agalactiae", None),
+    "NHRTIBACT D01-26": ("Gram positive", "Cocci", "Staphylococcus aureus",
+                         None),
+    "NHRTIBACT E01-26": ("Gram negative", "Bacilli", "Klebsiella pneumoniae",
+                         [("AMIKACIN", 20.0, "S"),
+                          ("CEFTRIAXONE", 10.0, "R"),
+                          ("CIPROFLOXACIN", 24.0, "S"),
+                          ("GENTAMICIN", 21.0, "S"),
+                          ("MEROPENEM", 26.0, "S")]),
+}
+
+# a wrong answer that is still a plausible one, so an unsatisfactory
+# participant looks like a real laboratory rather than a typing error
+BACT_MISCALLS = {
+    "Escherichia coli": "Klebsiella pneumoniae",
+    "Staphylococcus epidermidis": "Staphylococcus aureus",
+    "Streptococcus agalactiae": "Streptococcus pyogenes",
+    "Staphylococcus aureus": "Staphylococcus epidermidis",
+    "Klebsiella pneumoniae": "Enterobacter cloacae",
+}
+
+
+async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
+                                       tested_on, submit=True, approve=False,
+                                       leave_last_draft=False):
+    """The same walk as the other forms, against the bacteriology worksheet."""
+    r = await c.get("/bacteriology-results/list", params={"pt_cycle_id": cycle_id})
+    sheets = r.json()
+    email_by_lab = {v["id"]: k for k, v in labs.items()}
+
+    by_lab = {}
+    for sheet in sheets:
+        by_lab.setdefault(sheet["lab_id"], []).append(sheet)
+
+    submitted = drafted = 0
+    for lab_id, items in by_lab.items():
+        email = email_by_lab.get(lab_id)
+        if email not in users:
+            continue
+
+        for i, sheet in enumerate(sorted(items, key=lambda x: x["method_sample_id"])):
+            sample_name = sheet["methodsample"]["name"]
+            stain, morphology, organism, ast = BACT_TARGETS.get(
+                sample_name, ("Gram negative", "Bacilli", "Escherichia coli", None))
+
+            last = leave_last_draft and i == len(items) - 1
+            as_draft = (not submit) or last
+
+            not_done = False
+            reason = None
+
+            # one laboratory in the round names the wrong organism
+            if (lab_id * 5 + i * 3) % 13 == 0:
+                organism = BACT_MISCALLS.get(organism, organism)
+
+            # and one receives a swab it cannot work at all
+            if (lab_id * 7 + i * 2) % 19 == 0:
+                not_done = True
+                reason = "Swab arrived dry, transport medium had leaked"
+
+            rows = []
+            if ast and not not_done:
+                for row_no, (agent, zone, interpretation) in enumerate(ast, 1):
+                    # the same laboratory that misnames an organism also calls
+                    # one susceptibility wrong
+                    if (lab_id * 3 + row_no) % 11 == 0:
+                        interpretation = "S" if interpretation == "R" else "R"
+                        zone = 24.0 if interpretation == "S" else 10.0
+                    rows.append(dict(
+                        ast_method="disk_diffusion", row_no=row_no,
+                        antibiotic=agent,
+                        zone_diameter=round(zone + spread(lab_id, row_no, 1.5), 1),
+                        mic_reading=None, interpretation=interpretation))
+
+            body = {k: v for k, v in sheet.items() if k not in (
+                "stage", "status", "user", "scheme", "laboratory", "service",
+                "enrollment", "ptcycle", "method", "methodsample")}
+            body.update(
+                user_id=users[email],
+                date_samples_received=received_on.isoformat(),
+                receipt_temperature=round(5.0 + spread(lab_id, i, 0.5), 1),
+                sample_condition="Unsuitable" if not_done else "Suitable",
+                sample_condition_reason=reason,
+                date_submitted=tested_on.isoformat(),
+                testing_not_done=not_done,
+                testing_not_done_reason=reason,
+                gram_stain_reaction=None if not_done else stain,
+                gram_morphology=None if not_done else morphology,
+                gram_morphology_other=None,
+                microscopy_comment=None,
+                organism_identified=None if not_done else organism,
+                identification_comment=None,
+                ast_performed=bool(rows),
+                ast_guideline="CLSI" if rows else None,
+                ast_disk_diffusion=bool(rows),
+                ast_mic_method=None,
+                ast_mic_method_other=None,
+                astresult=rows,
+                comments=None,
+                reported_by=labs[email]["name"].split()[0] + " Technologist",
+                reported_on=tested_on.isoformat(),
+                reviewed_by="Laboratory In-charge",
+                reviewed_on=tested_on.isoformat(),
+                status_id=assist.STATUS_DRAFT if as_draft else assist.STATUS_SUBMITTED,
+                stage_id=(assist.APPROVAL_STAGE_AWAIT_SUBMISSION if as_draft
+                          else assist.APPROVAL_STAGE_SUBMITTED))
+
+            rr = await c.put(f"/bacteriology-results/update/{sheet['id']}", json=body)
+            if rr.status_code != 200:
+                fail(f"bacteriology result {sheet['id']}", rr)
+                continue
+
+            if as_draft:
+                drafted += 1
+                continue
+            submitted += 1
+
+            if approve:
+                ar = await c.put(
+                    f"/bacteriology-results/review-update/{sheet['id']}", json={
+                        "user_id": GRADER_ID,
+                        "review_action": assist.REVIEW_ACTION_APPROVE,
+                        "comments": "Checked against the characterised strain",
+                        "content": None, "attachment_id": None})
+                if ar.status_code != 200:
+                    fail(f"grade bacteriology {sheet['id']}", ar)
+
+    note(f"Bacteriology: {submitted} worksheet(s) submitted, {drafted} left as draft"
+         + (", all submitted worksheets graded" if approve else ""))
+
+
 async def backdate(cycle_id, effective, closing, shipping, reports):
     """Pulls a finished cycle's dates into the past so it reads as historical."""
     async with database.AsyncSessionLocal() as db:
@@ -1133,6 +1370,46 @@ async def workflow():
             await advance(c, v3, assist.PT_CYCLE_STARTED, "VL-2027-A")
             note("labs enrolled in the viral load scheme can enrol from My Enrolments")
 
+        # ---- the NHRTI bacteriology surveys ------------------------------
+        # two surveys a year, per the calendar in TF-NHRTI-BACT-002
+        print("\n15. Bacteriology Survey 01-2026 (completed)")
+        b1 = await make_cycle(c, "Bacteriology Survey One 2026", "BACT-01-2026",
+                              TODAY + timedelta(days=10), TODAY + timedelta(days=40),
+                              TODAY + timedelta(days=50), TODAY + timedelta(days=90),
+                              scheme_id=4)
+        if b1:
+            await advance(c, b1, assist.PT_CYCLE_STARTED, "BACT-01-2026")
+            await enrol(c, b1, labs, users, active)
+            await accept_enrolments(c, b1)
+            await advance(c, b1, assist.PT_CYCLE_SAMPLES_SHIPPED, "BACT-01-2026")
+            await receive_all(c, b1, users, labs, TODAY - timedelta(days=90))
+            await capture_bacteriology_results(
+                c, b1, users, labs,
+                TODAY - timedelta(days=90), TODAY - timedelta(days=80),
+                submit=True, approve=True)
+            await advance(c, b1, assist.PT_CYCLE_REPORT_AVAILABLE, "BACT-01-2026")
+            await advance(c, b1, assist.PT_CYCLE_CLOSED, "BACT-01-2026")
+            await backdate(b1, TODAY - timedelta(days=160), TODAY - timedelta(days=120),
+                           TODAY - timedelta(days=95), TODAY - timedelta(days=30))
+
+        print("\n16. Bacteriology Survey 02-2026 (samples shipped)")
+        b2 = await make_cycle(c, "Bacteriology Survey Two 2026", "BACT-02-2026",
+                              TODAY - timedelta(days=25), TODAY + timedelta(days=30),
+                              TODAY - timedelta(days=6), TODAY + timedelta(days=80),
+                              scheme_id=4)
+        if b2:
+            await advance(c, b2, assist.PT_CYCLE_STARTED, "BACT-02-2026")
+            await enrol(c, b2, labs, users, active)
+            await accept_enrolments(c, b2)
+            await advance(c, b2, assist.PT_CYCLE_SAMPLES_SHIPPED, "BACT-02-2026")
+            await receive_all(c, b2, users, labs, TODAY - timedelta(days=3))
+            await capture_bacteriology_results(
+                c, b2, users, labs,
+                TODAY - timedelta(days=3), TODAY - timedelta(days=1),
+                submit=True, approve=False, leave_last_draft=True)
+            await backdate(b2, TODAY - timedelta(days=25), TODAY - timedelta(days=9),
+                           TODAY - timedelta(days=6), TODAY + timedelta(days=80))
+
 
 
 async def summary():
@@ -1208,7 +1485,8 @@ async def summary():
                                 (select count(*) from tb_xpert_ultra_results t where t.pt_cycle_id=c.id)
                                 + (select count(*) from tb_xpert_xdr_results x where x.pt_cycle_id=c.id)
                                 + (select count(*) from hiv_vl_results v where v.pt_cycle_id=c.id)
-                                + (select count(*) from hiv_eid_results d where d.pt_cycle_id=c.id) res
+                                + (select count(*) from hiv_eid_results d where d.pt_cycle_id=c.id)
+                                + (select count(*) from bacteriology_results b where b.pt_cycle_id=c.id) res
                                 from pt_cycles c
                                 join pt_cycle_statuses p on p.id=c.pt_cyle_status_id
                                 join schemes sc on sc.id=c.scheme_id
@@ -1216,18 +1494,37 @@ async def summary():
         print(f"   {r['code']:11} {r['scheme'][:34]:34} {r['status']:17} "
               f"closes {r['closing_date']}  {r['enr']} enr  {r['res']} results")
 
+    print("\nNoticeboard")
+    for r in await con.fetch("""select a.category, s.status_name,
+                                       count(*) c,
+                                       count(*) filter (
+                                           where a.status_id = 4
+                                             and (a.publish_from is null
+                                                  or a.publish_from <= current_date)
+                                             and (a.publish_until is null
+                                                  or a.publish_until >= current_date)
+                                       ) live
+                                from announcements a
+                                join list_statuses s on s.id = a.status_id
+                                group by 1,2 order by 1,2"""):
+        print(f"   {r['category']:10} {r['status_name']:12} {r['c']} "
+              f"({r['live']} on the board today)")
+
     print("\nRow counts")
     for t in ("providers", "schemes", "services", "methods", "method_samples",
               "laboratorys", "applications", "pt_cycles", "enrollments",
               "tb_xpert_ultra_results", "tb_xpert_xdr_results",
-              "hiv_vl_results", "hiv_eid_results", "pt_sample_statistics",
+              "hiv_vl_results", "hiv_eid_results", "bacteriology_results",
+              "bacteriology_ast_results", "announcements",
+              "pt_sample_statistics",
               "pt_result_evaluations", "pt_enrollment_performance", "users"):
         n = await con.fetchval(f"select count(*) from {t}")
         print(f"   {t:26} {n}")
 
     for label, table in (("Ultra", "tb_xpert_ultra_results"),
                          ("XDR", "tb_xpert_xdr_results"),
-                         ("EID", "hiv_eid_results")):
+                         ("EID", "hiv_eid_results"),
+                         ("Bacteriology", "bacteriology_results")):
         print(f"\n{label} results by status")
         for r in await con.fetch(f"""select s.status_name, count(*) c
                                      from {table} t
@@ -1235,10 +1532,14 @@ async def summary():
                                      group by 1 order by 1"""):
             print(f"   {r['status_name']:16} {r['c']}")
 
-        outcome = ("coalesce(hiv_result, not_tested_reason, '(not captured)')"
-                   if table == "hiv_eid_results"
-                   else "coalesce(tb_detection_result, uninterpretable_result, "
-                        "'(not captured)')")
+        if table == "hiv_eid_results":
+            outcome = "coalesce(hiv_result, not_tested_reason, '(not captured)')"
+        elif table == "bacteriology_results":
+            outcome = ("coalesce(organism_identified, testing_not_done_reason, "
+                       "'(not captured)')")
+        else:
+            outcome = ("coalesce(tb_detection_result, uninterpretable_result, "
+                       "'(not captured)')")
 
         print(f"{label} results by outcome")
         for r in await con.fetch(f"""select {outcome} v, count(*) c
@@ -1274,12 +1575,261 @@ async def summary():
     await con.close()
 
 
+# --------------------------------------------------------------------------
+# 17. the noticeboard
+# --------------------------------------------------------------------------
+# What the provider tells its participants. Written through the API like
+# everything else, so a seeded notice is one the running system would accept.
+#
+# scheme ids: 1 TB, 2 HIV-1 VL, 3 HIV EID, 4 Bacteriology
+NOTICES = [
+    # name, category, audience, scheme_id, pinned, body, extras, how it ends up
+    dict(
+        name="Annual EQA Participants Training Day",
+        category="Event", audience="All Participants", pinned=True,
+        description="One day, all schemes, Ndola. Registration closes two weeks before.",
+        body="The annual training day covers result capture on the new platform, "
+             "reading your performance report, and corrective action for "
+             "unsatisfactory results. One place per participating laboratory is "
+             "funded; further places are at the laboratory's own cost.",
+        event_at=TODAY + timedelta(days=45),
+        event_ends_at=TODAY + timedelta(days=45),
+        location="Ndola Teaching Hospital, 7th Floor Conference Room",
+        publish=True,
+    ),
+    dict(
+        name="EQA System Development Meeting",
+        category="Meeting", audience="All Participants",
+        description="Quarterly review of the platform with participating laboratories.",
+        body="Agenda: progress on the result forms now live, the bacteriology "
+             "scheme's first survey, and what participants want next. Laboratories "
+             "unable to attend in person may join on the link below.",
+        event_at=TODAY + timedelta(days=12),
+        location="Hybrid - NHRTI Ndola and Teams",
+        publish=True,
+    ),
+    dict(
+        name="Bacteriology Scheme Protocol TP-NHRTI-BACT-001",
+        category="Resource", audience="Scheme", scheme_id=4,
+        description="The scheme protocol, including the complaints and appeals procedures.",
+        body="Every laboratory enrolled in the bacteriology scheme should hold a "
+             "current copy of the scheme protocol. It sets out the panel, the "
+             "reporting format, how results are scored, and how to appeal an "
+             "evaluation. Section 17 covers the scoring criteria and the "
+             "acceptable performance score.",
+        link_url="https://nhrti.moh.gov.zm/eqa/bacteriology/TP-NHRTI-BACT-001.pdf",
+        publish=True,
+    ),
+    dict(
+        name="Bacteriology Participant Instructions and Worksheet",
+        category="Resource", audience="Scheme", scheme_id=4,
+        description="TF-NHRTI-BACT-003 and the worksheet TF-NHRTI-BACT-001.",
+        body="Sample condition must be documented on the worksheet on receipt of "
+             "the PT panel. Swabs are to be stored at room temperature for five "
+             "minutes before inoculating directly onto the applicable media. "
+             "Process the PT samples exactly as you would routine samples.",
+        link_url="https://nhrti.moh.gov.zm/eqa/bacteriology/TF-NHRTI-BACT-003.pdf",
+        publish=True,
+    ),
+    dict(
+        name="Xpert Module Verification Reminder",
+        category="General", audience="Scheme", scheme_id=1,
+        description="Record the module number on every Xpert result you report.",
+        body="Several results in the last round were submitted without a module "
+             "number. The module is needed to investigate an unacceptable result, "
+             "so a result reported without one cannot be followed up. Please "
+             "check the field before submitting.",
+        publish=True,
+    ),
+    dict(
+        name="Courier Delay Affecting Northern and Muchinga Shipments",
+        category="General", audience="All Participants",
+        description="Panels dispatched last week are running about four days late.",
+        body="The courier has advised of a delay on the northern route. "
+             "Laboratories affected should record the actual date of receipt on "
+             "their worksheets as usual; the trial closing date will be extended "
+             "where the delay materially reduces testing time. Contact the scheme "
+             "coordinator if your panel arrives in an unsuitable condition.",
+        publish_until=TODAY + timedelta(days=20),
+        publish=True,
+    ),
+    dict(
+        name="Viral Load Round VL-2027-A Opens for Enrolment",
+        category="General", audience="Scheme", scheme_id=2,
+        description="Enrol from My Enrolments before the closing date.",
+        body="Enrolment for the first viral load round of 2027 is now open. "
+             "Laboratories running more than one platform should enrol each "
+             "platform separately, as each receives its own panel.",
+        publish_from=TODAY + timedelta(days=30),
+        publish=True,
+    ),
+    dict(
+        name="Draft - Scheme Fee Schedule 2027",
+        category="General", audience="All Participants",
+        description="Not for circulation until finance has signed it off.",
+        body="The 2027 fee schedule is being finalised and will be circulated "
+             "once approved.",
+        publish=False,
+    ),
+    dict(
+        name="Withdrawal of Survey BACT-01-2026 Feedback Report",
+        category="General", audience="Scheme", scheme_id=4,
+        description="An earlier version of the report was issued in error.",
+        body="The feedback report circulated for survey BACT-01-2026 contained an "
+             "error in the AST evaluation table. A corrected report has been "
+             "issued. Please discard the earlier version.",
+        publish_until=TODAY - timedelta(days=5),
+        publish=True,
+    ),
+    dict(
+        # this one wants a second pair of eyes before it goes out
+        name="Change to the Acceptable Performance Score",
+        category="General", audience="All Participants",
+        description="Reviewed by a second officer before circulation.",
+        body="Participants are reminded that the acceptable performance score for "
+             "the bacteriology scheme is 100%. Laboratories scoring below this "
+             "should initiate corrective action in line with their own quality "
+             "management procedures and retain the PT samples until the "
+             "performance report is received.",
+        approval_levels=2,
+        publish=True,
+    ),
+]
+
+
+async def noticeboard():
+    transport = ASGITransport(app=main.app)
+    async with AsyncClient(transport=transport, base_url="http://seed", timeout=60) as c:
+        # The coordinator writes the board. Where a notice asks to be
+        # reviewed, the reviewers are taken in turn from here: a reviewer may
+        # not review what they wrote, nor review their own earlier decision, so
+        # two levels of approval genuinely needs two other people.
+        author = await _user_id("nkoleevans@hotmail.com")
+        reviewers = [
+            GRADER_ID,
+            await _user_id("head@cdl.moh.gov.zm"),
+        ]
+
+        published = drafted = reviewed = 0
+
+        for notice in NOTICES:
+            wants_publishing = notice.get("publish", False)
+            levels = notice.get("approval_levels", 1)
+
+            body = dict(
+                name=notice["name"],
+                description=notice.get("description"),
+                body=notice.get("body"),
+                category=notice["category"],
+                audience=notice["audience"],
+                scheme_id=notice.get("scheme_id"),
+                pinned=notice.get("pinned", False),
+                publish_from=_day(notice.get("publish_from")),
+                publish_until=_day(notice.get("publish_until")),
+                event_at=_moment(notice.get("event_at")),
+                event_ends_at=_moment(notice.get("event_ends_at")),
+                location=notice.get("location"),
+                link_url=notice.get("link_url"),
+                user_id=author,
+                status_id=assist.STATUS_DRAFT,
+                stage_id=assist.APPROVAL_STAGE_AWAIT_SUBMISSION,
+                approval_levels=levels,
+            )
+
+            r = await c.post("/announcements/create", json=body)
+            if r.status_code != 200:
+                fail(f"announcement '{notice['name']}'", r)
+                continue
+
+            announcement_id = r.json()["id"]
+
+            if not wants_publishing:
+                drafted += 1
+                continue
+
+            if levels == 1:
+                r = await c.put(f"/announcements/publish/{announcement_id}",
+                                json={"user_id": author, "comments": None})
+                if r.status_code != 200:
+                    fail(f"publish '{notice['name']}'", r)
+                    continue
+                published += 1
+            else:
+                # the gated path: submitted by its author, then approved once
+                # per level by someone else
+                r = await c.put(f"/announcements/submit/{announcement_id}",
+                                json={"user_id": author, "comments": None})
+                if r.status_code != 200:
+                    fail(f"submit '{notice['name']}'", r)
+                    continue
+
+                approved = False
+                for reviewer in reviewers[:levels]:
+                    r = await c.put(
+                        f"/announcements/review-update/{announcement_id}",
+                        json={"user_id": reviewer,
+                              "review_action": assist.REVIEW_ACTION_APPROVE,
+                              "comments": "Wording agreed with the scheme head",
+                              "content": None, "attachment_id": None})
+                    if r.status_code != 200:
+                        fail(f"review '{notice['name']}'", r)
+                        break
+                    approved = r.json()["status_id"] == assist.STATUS_APPROVED
+
+                if not approved:
+                    fail(f"review '{notice['name']}' did not publish it",
+                         type("R", (), {"status_code": 0,
+                                        "text": f"{levels} level(s) of approval"})())
+                    continue
+
+                published += 1
+                reviewed += 1
+
+        note(f"{published} notice(s) published ({reviewed} through review), "
+             f"{drafted} left as draft")
+
+        r = await c.get("/announcements/feed")
+        note(f"the board for everyone shows {len(r.json())} notice(s)")
+
+    print("17. noticeboard ready")
+
+
+async def _user_id(email):
+    from sqlalchemy.future import select
+    from models.user_model import UserDB
+    async with database.AsyncSessionLocal() as db:
+        user = (await db.execute(
+            select(UserDB).where(UserDB.email == email))).scalars().first()
+        return user.id
+
+
+def _day(value):
+    return value.isoformat() if value else None
+
+
+def _moment(value):
+    """A seeded event sits mid morning, so it reads as a real appointment.
+
+    The offset is written out rather than left implicit: a bare 09:30 is only
+    half past nine to a database whose session timezone happens to agree, and
+    a meeting invitation that moves with the server's settings is worse than
+    no invitation at all.
+    """
+    if not value:
+        return None
+    return datetime(
+        value.year, value.month, value.day, 9, 30,
+        tzinfo=ZoneInfo(assist.CURRENT_TIME_ZONE),
+    ).isoformat()
+
+
 async def main_():
     await reset()
     await staff()
     await catalogue()
     await resolve_grader()
     await workflow()
+    await noticeboard()
     await summary()
 
     if FAILURES:

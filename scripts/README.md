@@ -17,6 +17,12 @@ through the API - registration, review, cycle status, enrolment, shipping,
 sample receipt and result capture. Because every step goes through the real
 endpoints, the data it produces is exactly what the running system allows.
 
+The catalogue it builds is three providers: CDL's TB scheme, Virology PT's
+viral load and early infant diagnosis schemes, and NHRTI's bacteriology
+scheme. It finishes by writing the noticeboard - events, meetings, resources
+and general notices, including one still in draft, one scheduled for a future
+date, one already expired and one taken through the review gate.
+
 Re-runnable. It does not touch the audit trail.
 
 Everyone it creates signs in with the password `12345678`.
@@ -81,13 +87,28 @@ page agree, and that a lab nobody has accepted yet is not shown as registered.
 venv\Scripts\python.exe scripts\checks\check_laboratories.py
 ```
 
+## checks/check_announcements.py
+
+Audits the noticeboard: that only provider staff can post, that a notice
+reaches participants only once it is published and only while its publish
+window is open, that a scheme notice goes to that scheme's laboratories and no
+further, that the configurable review gate really gates, and that the rules on
+what a notice must say before it goes out hold.
+
+It writes its own announcements and removes them again, asserting the table is
+back to the size it started at.
+
+```
+venv\Scripts\python.exe scripts\checks\check_announcements.py
+```
+
 ## checks/check_result_rounds.py
 
 Audits the round picker on the result listings. A listing no longer shows every
 result at once: a round has to be chosen first. This checks what the picker is
 offered (only rounds that actually have sheets, newest first, counts that add
 up) and that choosing one narrows the listing to it - for the provider's view
-of all four forms, and for a laboratory's view of its own.
+of all five forms, and for a laboratory's view of its own.
 
 ```
 venv\Scripts\python.exe scripts\checks\check_result_rounds.py

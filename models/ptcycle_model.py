@@ -73,6 +73,7 @@ class PTCycleDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="ptcycle", lazy='raise')
     hivvlresult = relationship("HIVVLResultDB", back_populates="ptcycle", lazy='raise')
     hiveidresult = relationship("HIVEIDResultDB", back_populates="ptcycle", lazy='raise')
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="ptcycle", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
 class PTCycle(BaseModel):

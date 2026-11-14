@@ -18,12 +18,14 @@ RESULT_FORM_TB_XPERT_ULTRA = "tb_xpert_ultra"
 RESULT_FORM_TB_XPERT_XDR = "tb_xpert_xdr"
 RESULT_FORM_HIV_VL = "hiv_vl"
 RESULT_FORM_HIV_EID = "hiv_eid"
+RESULT_FORM_BACTERIOLOGY = "bacteriology"
 
 RESULT_FORMS = [
     RESULT_FORM_TB_XPERT_ULTRA,
     RESULT_FORM_TB_XPERT_XDR,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_HIV_EID,
+    RESULT_FORM_BACTERIOLOGY,
 ]
 
 
@@ -88,6 +90,7 @@ class MethodDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="method", lazy='raise')
     hivvlresult = relationship("HIVVLResultDB", back_populates="method", lazy='raise')
     hiveidresult = relationship("HIVEIDResultDB", back_populates="method", lazy='raise')
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="method", lazy='raise')
     applications = relationship("ApplicationsDB", back_populates="method", lazy='raise')
 
 # ---------- Pydantic Schemas ----------

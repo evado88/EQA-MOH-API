@@ -20,6 +20,7 @@ from models.tbxpertultraresult_model import TBXpertUltraResultDB
 from models.tbxpertxdrresult_model import TBXpertXDRResultDB
 from models.hivvlresult_model import HIVVLResultDB
 from models.hiveidresult_model import HIVEIDResultDB
+from models.bacteriologyresult_model import BacteriologyResultDB
 from models.evaluation_model import ParamEvaluateCycle, EvaluateCycleResult
 from helpers import evaluation
 from models.user_model import User, UserDB
@@ -36,6 +37,7 @@ from models.method_model import (
     RESULT_FORM_TB_XPERT_XDR,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_HIV_EID,
+    RESULT_FORM_BACTERIOLOGY,
 )
 from models.enrollment_model import EnrollmentDB
 
@@ -48,6 +50,7 @@ RESULT_MODEL_BY_FORM = {
     RESULT_FORM_TB_XPERT_XDR: TBXpertXDRResultDB,
     RESULT_FORM_HIV_VL: HIVVLResultDB,
     RESULT_FORM_HIV_EID: HIVEIDResultDB,
+    RESULT_FORM_BACTERIOLOGY: BacteriologyResultDB,
 }
 
 

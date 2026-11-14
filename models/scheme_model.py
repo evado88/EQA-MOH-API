@@ -68,6 +68,8 @@ class SchemeDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="scheme", lazy='raise')
     hivvlresult = relationship("HIVVLResultDB", back_populates="scheme", lazy='raise')
     hiveidresult = relationship("HIVEIDResultDB", back_populates="scheme", lazy='raise')
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="scheme", lazy='raise')
+    announcement = relationship("AnnouncementDB", back_populates="scheme", lazy='raise')
     applications = relationship("ApplicationsDB", back_populates="scheme", lazy='raise')
     service = relationship("ServiceDB", back_populates="scheme", lazy='raise')
 

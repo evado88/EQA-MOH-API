@@ -17,6 +17,7 @@ from typing import Optional
 from database import get_db
 from helpers import assist
 from models.method_model import (
+    RESULT_FORM_BACTERIOLOGY,
     RESULT_FORM_HIV_EID,
     RESULT_FORM_HIV_VL,
     RESULT_FORM_TB_XPERT_ULTRA,
@@ -31,6 +32,7 @@ RESULT_TABLES = [
     (RESULT_FORM_TB_XPERT_XDR, "tb_xpert_xdr_results", "TB Xpert XDR"),
     (RESULT_FORM_HIV_VL, "hiv_vl_results", "HIV-1 Viral Load"),
     (RESULT_FORM_HIV_EID, "hiv_eid_results", "HIV-1 EID"),
+    (RESULT_FORM_BACTERIOLOGY, "bacteriology_results", "Bacteriology"),
 ]
 
 STATUS_NAMES = {
@@ -407,6 +409,70 @@ async def get_dashboard_summary(
         row["closingDate"] = row.pop("closing_date")
         row["reportDate"] = row.pop("reports_availability_date")
 
+    # ------------------------------------------------------------ noticeboard
+    # The board as this viewer sees it. A laboratory is shown what is actually
+    # addressed to it - the notices for everyone plus the notices for its own
+    # schemes - while provider staff see the whole published board and how much
+    # is still sitting in draft.
+    if scoped:
+        notices = await _rows(
+            db,
+            """
+            SELECT announcement_id, name, description, category, scheme_name,
+                   pinned, event_at, location, link_url, published_at
+            FROM vw_announcement_audience
+            WHERE lab_id = :lab_id
+            ORDER BY pinned DESC, published_at DESC NULLS LAST, announcement_id DESC
+            LIMIT 5
+            """,
+            params,
+        )
+    else:
+        notices = await _rows(
+            db,
+            """
+            SELECT a.id AS announcement_id, a.name, a.description, a.category,
+                   s.name AS scheme_name, a.pinned, a.event_at, a.location,
+                   a.link_url, a.published_at
+            FROM announcements a
+            LEFT JOIN schemes s ON s.id = a.scheme_id
+            WHERE a.status_id = :approved
+              AND (a.publish_from IS NULL OR a.publish_from <= CURRENT_DATE)
+              AND (a.publish_until IS NULL OR a.publish_until >= CURRENT_DATE)
+            ORDER BY a.pinned DESC, a.published_at DESC NULLS LAST, a.id DESC
+            LIMIT 5
+            """,
+            {"approved": assist.STATUS_APPROVED},
+        )
+
+    announcement_counts = await _rows(
+        db,
+        """
+        SELECT status_id, count(*) AS n FROM announcements GROUP BY 1
+        """,
+    )
+    notice_counts = {row["status_id"]: row["n"] for row in announcement_counts}
+
+    # how many of the published ones are on the board today rather than waiting
+    # for their window to open, or already past it
+    live_total = await _rows(
+        db,
+        """
+        SELECT count(*) AS n FROM announcements
+        WHERE status_id = :approved
+          AND (publish_from IS NULL OR publish_from <= CURRENT_DATE)
+          AND (publish_until IS NULL OR publish_until >= CURRENT_DATE)
+        """,
+        {"approved": assist.STATUS_APPROVED},
+    )
+
+    for row in notices:
+        row["announcementId"] = row.pop("announcement_id")
+        row["schemeName"] = row.pop("scheme_name")
+        row["eventAt"] = row.pop("event_at")
+        row["linkUrl"] = row.pop("link_url")
+        row["publishedAt"] = row.pop("published_at")
+
     return {
         "scope": "laboratory" if scoped else "provider",
         "labId": lab_id,
@@ -458,4 +524,12 @@ async def get_dashboard_summary(
         "labTypeList": lab_type_list,
         "participantList": participant_list,
         "openCycleList": open_cycles,
+        "noticeboard": {
+            "live": live_total[0]["n"] if live_total else 0,
+            "published": notice_counts.get(assist.STATUS_APPROVED, 0),
+            "draft": notice_counts.get(assist.STATUS_DRAFT, 0),
+            "awaitingReview": notice_counts.get(assist.STATUS_SUBMITTED, 0)
+            + notice_counts.get(assist.STATUS_UNDER_REVIEW, 0),
+        },
+        "announcementList": notices,
     }

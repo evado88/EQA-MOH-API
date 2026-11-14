@@ -77,6 +77,7 @@ class MethodSampleDB(Base):
     tbxpertxdrresult = relationship("TBXpertXDRResultDB", back_populates="methodsample", lazy='raise')
     hivvlresult = relationship("HIVVLResultDB", back_populates="methodsample", lazy='raise')
     hiveidresult = relationship("HIVEIDResultDB", back_populates="methodsample", lazy='raise')
+    bacteriologyresult = relationship("BacteriologyResultDB", back_populates="methodsample", lazy='raise')
 
 # ---------- Pydantic Schemas ----------
 class MethodSample(BaseModel):
