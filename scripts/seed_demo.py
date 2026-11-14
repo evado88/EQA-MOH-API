@@ -7,6 +7,7 @@ the API, so the demo data is by construction exactly what the running system
 produces.
 """
 import asyncio
+import os
 import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -16,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 import database
+
+# the seed drives the date-derived lifecycle through the dev phase-jump helper,
+# so make sure it is switched on before the routers are imported
+os.environ["ENABLE_DEV_TOOLS"] = "1"
 
 DEV_URL = "postgresql+asyncpg://postgres:Abc123@localhost:5432/moheqa"
 database.engine = create_async_engine(DEV_URL, echo=False)
@@ -28,7 +33,9 @@ from helpers import assist  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 DEMO_PASSWORD = "12345678"
-TODAY = date(2026, 9, 14)
+# lifecycle status is derived from the schedule against the real clock, so the
+# demo calendar is anchored to today rather than a fixed date
+TODAY = assist.get_current_date().date()
 
 APPROVED = dict(status_id=assist.STATUS_APPROVED,
                 stage_id=assist.APPROVAL_STAGE_APPROVED,
@@ -140,9 +147,9 @@ async def catalogue():
         return row
 
     async with database.AsyncSessionLocal() as db:
-        # the dictionaries must match the constants the code reasons with
-        for i, name in enumerate(["Upcoming", "Started", "Samples Shipped",
-                                  "Report Available", "Closed"], 1):
+        # the lifecycle statuses must match the derived-status constants exactly
+        # (id -> name), so the seven date-driven phases line up with the model
+        for i, name in assist.PT_CYCLE_STATUS_NAMES.items():
             await upsert(db, PTCycleStatusDB, {"id": i}, name=name, user_id=1, **APPROVED)
         for i, name in enumerate(["Government", "Private", "Religious", "Mine"], 1):
             await upsert(db, LabTypeDB, {"id": i}, name=name, user_id=1, **APPROVED)
@@ -500,75 +507,160 @@ LABS = [
 ]
 
 
+async def _one(sql, **params):
+    """Fetch a single row for the small lookups the registration flow needs."""
+    async with database.AsyncSessionLocal() as db:
+        return (await db.execute(text(sql), params)).first()
+
+
+async def _pick_facilities(n):
+    """A distinct Zambian facility (from the MFL) for each demo laboratory.
+
+    Drawn from the high end of the list so the low-numbered facilities stay
+    free for ad-hoc and automated signup testing.
+    """
+    async with database.AsyncSessionLocal() as db:
+        rows = (await db.execute(text(
+            "SELECT id FROM facilities WHERE district_id IS NOT NULL "
+            "ORDER BY id DESC LIMIT :n"), {"n": n})).all()
+    return [r[0] for r in rows]
+
+
+async def _method_scheme_map():
+    """method id -> scheme id, so a lab's methods can be grouped by scheme."""
+    async with database.AsyncSessionLocal() as db:
+        rows = (await db.execute(text("SELECT id, scheme_id FROM methods"))).all()
+    return {mid: sid for mid, sid in rows}
+
+
 async def register_labs(c):
-    """Every lab registers itself through the public signup endpoint."""
-    labs = {}
-    for name, contact, email, lab_type, prov, dist, methods in LABS:
+    """Each person self-registers through the live four-step flow (signup ->
+    verify -> set password) and then registers a laboratory for every scheme
+    their methods belong to - registration is per scheme now.
+
+    Returns the per-scheme laboratory records and the user id for each email.
+    """
+    import jose.jwt as jwt
+    facilities = await _pick_facilities(len(LABS))
+    scheme_of = await _method_scheme_map()
+
+    labs = []          # one record per (person, scheme) laboratory
+    users = {}         # email -> user id (the person)
+
+    for (name, contact, email, lab_type, prov, dist, methods), facility_id in zip(
+            LABS, facilities):
+        phone = "+26097" + str(abs(hash(email)) % 10000000).zfill(7)
+
+        # 1. the person signs themselves up against a facility
         r = await c.post("/auth/signup", json=dict(
-            name=name, contact_person_name=contact, lab_type_id=lab_type,
-            position="Laboratory In-charge", phone_number="+26097" + str(abs(hash(email)) % 10000000).zfill(7),
-            province_id=prov, district_id=dist, email_address=email,
-            physical_address=f"{name}, Zambia",
-            method_list=[{"id": m} for m in methods]))
+            country="Zambia", name=contact, position="Laboratory In-charge",
+            phone_number=phone, email=email, facility_id=facility_id))
         if r.status_code != 200:
             fail(f"signup {name}", r)
             continue
-        body = r.json()
-        labs[email] = dict(id=body["laboratory_id"], code=body["code"], name=name)
-        note(f"{body['code']}  {name}  ({body['application_count']} application(s))")
-    print(f"4. {len(labs)} laboratories registered")
-    return labs
+
+        # 2+3. verification token (email is suppressed), then set the password
+        token_row = await _one(
+            "SELECT verification_token FROM users WHERE email=:e", e=email)
+        r = await c.post("/auth/set-password",
+                         json={"token": token_row[0], "password": DEMO_PASSWORD})
+        if r.status_code != 200:
+            fail(f"set-password {name}", r)
+            continue
+
+        lr = await c.post("/auth/login",
+                          data={"username": email, "password": DEMO_PASSWORD})
+        if lr.status_code != 200:
+            fail(f"login {email}", lr)
+            continue
+        users[email] = jwt.decode(lr.json()["access_token"], assist.SECRET_KEY,
+                                  algorithms=[assist.ALGORITHM])["userid"]
+
+        # 4. a laboratory registration per scheme the methods belong to
+        by_scheme = {}
+        for m in methods:
+            by_scheme.setdefault(scheme_of[m], []).append(m)
+
+        for scheme_id, ms in sorted(by_scheme.items()):
+            r = await c.post("/registration/register-scheme", json={
+                "user_email": email, "scheme_id": scheme_id, "name": name,
+                "lab_type_id": lab_type, "physical_address": f"{name}, Zambia",
+                "method_list": [{"id": m} for m in ms], "facility_id": facility_id,
+                "terms_accepted": True, "confidentiality_waiver": False})
+            if r.status_code != 200:
+                fail(f"register {name} scheme {scheme_id}", r)
+                continue
+            body = r.json()
+            labs.append(dict(email=email, user_id=users.get(email), scheme_id=scheme_id,
+                             lab_id=body["laboratory_id"], code=body["code"],
+                             name=name, approved=False))
+        note(f"{name}: {len([l for l in labs if l['email'] == email])} "
+             f"scheme registration(s)")
+
+    print(f"4. {len(labs)} laboratory registration(s) across {len(users)} people")
+    return labs, users
 
 
 async def approve_labs(c, labs):
-    """The provider reviews each registration. One is left pending, one rejected."""
+    """The provider reviews each laboratory registration. One person is left
+    awaiting review and one is rejected; the rest are accepted. Marks the
+    accepted records so only they go on to enrol."""
     pending = "brian.kunda@solwezi.health.zm"
     rejected = "naomi.sakala@livingstone.health.zm"
-    users = {}
+    accepted = 0
 
-    import jose.jwt as jwt
-    for email, lab in labs.items():
-        if email == pending:
-            note(f"{lab['name']}: left awaiting review")
-            continue
+    for lab in labs:
+        if lab["email"] == pending:
+            continue  # left awaiting review
 
-        action = (assist.REVIEW_ACTION_REJECT if email == rejected
+        action = (assist.REVIEW_ACTION_REJECT if lab["email"] == rejected
                   else assist.REVIEW_ACTION_APPROVE)
-        r = await c.put(f"/laboratorys/review-update/{lab['id']}", json={
+        r = await c.put(f"/laboratorys/review-update/{lab['lab_id']}", json={
             "user_id": 1, "review_action": action,
             "comments": ("Documentation incomplete - please reapply"
                          if action == assist.REVIEW_ACTION_REJECT
                          else "Registration verified against the CDL register"),
             "content": None, "attachment_id": None})
         if r.status_code != 200:
-            fail(f"review {lab['name']}", r)
+            fail(f"review {lab['name']} ({lab['code']})", r)
             continue
 
-        if action == assist.REVIEW_ACTION_REJECT:
-            note(f"{lab['name']}: REJECTED")
-            continue
+        if action == assist.REVIEW_ACTION_APPROVE:
+            lab["approved"] = True
+            accepted += 1
 
-        lr = await c.post("/auth/login", data={"username": email, "password": DEMO_PASSWORD})
-        if lr.status_code != 200:
-            fail(f"login {email}", lr)
-            continue
-        claims = jwt.decode(lr.json()["access_token"], assist.SECRET_KEY,
-                            algorithms=[assist.ALGORITHM])
-        users[email] = claims["userid"]
-        note(f"{lab['name']}: approved, account {email} active")
+    note(f"{pending} left awaiting review; {rejected} rejected")
+    print(f"5. {accepted} laboratory registration(s) accepted")
 
-    print(f"5. {len(users)} laboratories approved and able to sign in")
-    return users
+
+def _full_schedule(effective, closing, shipping, reports):
+    """Builds the complete seven-date schedule the API now requires.
+
+    Only four anchors are supplied per round; the test-event window and the
+    result-submission due date are placed between shipping and reports. The
+    anchors are sorted first so a round written in the old order still produces
+    a valid, strictly ascending schedule - the final dates are set precisely by
+    advance()/backdate() anyway.
+    """
+    eff, close, ship, rep = sorted([effective, closing, shipping, reports])
+    span = max((rep - ship).days, 6)
+    return {
+        "effective_date": eff.isoformat(),
+        "closing_date": close.isoformat(),
+        "shipping_date": ship.isoformat(),
+        "test_event_start_date": (ship + timedelta(days=span // 5)).isoformat(),
+        "test_event_stop_date": (ship + timedelta(days=(span * 2) // 5)).isoformat(),
+        "result_submission_due_date": (ship + timedelta(days=(span * 4) // 5)).isoformat(),
+        "reports_availability_date": rep.isoformat(),
+    }
 
 
 async def make_cycle(c, name, code, effective, closing, shipping, reports,
                      scheme_id=1):
     r = await c.post("/pt-cycles/create", json=dict(
         name=name, code=code, description=f"{name} proficiency testing round",
-        scheme_id=scheme_id, effective_date=effective.isoformat(),
-        pt_cyle_status_id=assist.PT_CYCLE_UPCOMING,
-        closing_date=closing.isoformat(), shipping_date=shipping.isoformat(),
-        reports_availability_date=reports.isoformat(),
+        scheme_id=scheme_id,
+        **_full_schedule(effective, closing, shipping, reports),
         user_id=1, status_id=assist.STATUS_SUBMITTED,
         stage_id=assist.APPROVAL_STAGE_SUBMITTED, approval_levels=1))
     if r.status_code != 200:
@@ -587,8 +679,20 @@ async def make_cycle(c, name, code, effective, closing, shipping, reports,
 
 
 async def advance(c, cycle_id, status_id, label):
-    r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                    json={"pt_cyle_status_id": status_id, "user_id": 1})
+    """Moves a cycle to a lifecycle phase.
+
+    Status is derived from the schedule, so the two manual gates use their real
+    endpoints (shipping opens the result sheets; publishing scores the round),
+    and the date-driven phases (enrolment open, etc.) are reached with the dev
+    phase-jump helper, which back-dates the schedule around today.
+    """
+    if status_id == assist.PT_CYCLE_SAMPLES_SHIPPED:
+        r = await c.put(f"/pt-cycles/samples-shipped/{cycle_id}", json={"user_id": 1})
+    elif status_id == assist.PT_CYCLE_REPORT_AVAILABLE:
+        r = await c.put(f"/pt-cycles/publish-reports/{cycle_id}", json={"user_id": 1})
+    else:
+        r = await c.put(f"/pt-cycles/dev-set-phase/{cycle_id}",
+                        json={"pt_cyle_status_id": status_id, "user_id": 1})
     if r.status_code != 200:
         fail(f"{label} -> {assist.PT_CYCLE_STATUS_NAMES[status_id]}", r)
         return False
@@ -596,46 +700,53 @@ async def advance(c, cycle_id, status_id, label):
     return True
 
 
-async def enrol(c, cycle_id, labs, users, emails):
-    """Offers the cycle to each lab; the server decides who is eligible.
+async def enrol(c, cycle_id, scheme_id, labs, users, emails):
+    """Offers the cycle to each approved laboratory registered for its scheme.
 
-    A lab with no approved method for the cycle's scheme is turned away, which
-    is the rule working rather than a seeding error - a TB-only lab has no
-    business in a viral load round.
+    Registration is per scheme now, so only the laboratory a person registered
+    for this cycle's scheme is offered - a TB lab has no business in a viral
+    load round.
     """
-    enrolled = skipped = 0
-    for email in emails:
-        if email not in users:
+    enrolled = 0
+    for lab in labs:
+        if lab["scheme_id"] != scheme_id or not lab["approved"]:
             continue
+        if lab["email"] not in emails:
+            continue
+
+        # a coordinator enrols on the lab's behalf: a person who registered for
+        # several schemes has several laboratories but their account is tied to
+        # only one, so self-enrolment cannot reach the others
         r = await c.post("/enrollments/apply", json={
-            "pt_cycle_id": cycle_id, "lab_id": labs[email]["id"],
-            "user_id": users[email]})
+            "pt_cycle_id": cycle_id, "lab_id": lab["lab_id"], "user_id": 1})
 
-        if r.status_code == 400 and "no approved methods for this scheme" in r.text:
-            skipped += 1
+        if r.status_code == 400 and "no approved methods" in r.text:
             continue
-
         if r.status_code != 200:
-            fail(f"enrol {labs[email]['name']}", r)
+            fail(f"enrol {lab['name']} ({lab['code']})", r)
             continue
 
         enrolled += 1
-        note(f"{labs[email]['name']} enrolled for {r.json()['enrollment_count']} method(s)")
+        note(f"{lab['name']} enrolled for {r.json()['enrollment_count']} method(s)")
 
-    if skipped:
-        note(f"{skipped} lab(s) not eligible for this scheme")
+    note(f"{enrolled} laboratory(ies) enrolled")
     return enrolled
 
 
 async def accept_enrolments(c, cycle_id, skip_email=None, labs=None):
+    skip_lab_ids = set()
+    if skip_email and labs:
+        skip_lab_ids = {lab["lab_id"] for lab in labs if lab["email"] == skip_email}
     r = await c.get(f"/enrollments/list/cycle/{cycle_id}")
     accepted = []
     for e in r.json():
-        if skip_email and labs and e["lab_id"] == labs[skip_email]["id"]:
+        if e["lab_id"] in skip_lab_ids:
             note(f"{e['laboratory']['name']}: enrolment left pending")
             continue
+        # a different member of staff reviews it; the coordinator who applied on
+        # the lab's behalf (user 1) cannot also be its first reviewer
         rr = await c.put(f"/enrollments/review-update/{e['id']}", json={
-            "user_id": 1, "review_action": assist.REVIEW_ACTION_APPROVE,
+            "user_id": 2, "review_action": assist.REVIEW_ACTION_APPROVE,
             "comments": "Enrolment accepted", "content": None, "attachment_id": None})
         if rr.status_code != 200:
             fail(f"accept enrolment {e['id']}", rr)
@@ -645,24 +756,41 @@ async def accept_enrolments(c, cycle_id, skip_email=None, labs=None):
     return accepted
 
 
+# the result sheets that shipping opens, one row per (cycle, lab, sample)
+_RESULT_TABLES = ("tb_xpert_ultra_results", "tb_xpert_xdr_results",
+                  "hiv_vl_results", "hiv_eid_results", "bacteriology_results")
+
+
 async def receive_all(c, cycle_id, users, labs, when):
-    r = await c.get(f"/enrollments/list/cycle/{cycle_id}")
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    """Records each sample's receipt, which the lab must do before entering
+    results. A receipt is logged per (cycle, lab, sample) against every result
+    sheet the shipping opened."""
+    user_by_lab = {lab["lab_id"]: lab["user_id"] for lab in labs}
+
+    pairs = set()
+    async with database.AsyncSessionLocal() as db:
+        for table in _RESULT_TABLES:
+            rows = (await db.execute(text(
+                f"SELECT DISTINCT lab_id, method_sample_id FROM {table} "
+                "WHERE pt_cycle_id=:c"), {"c": cycle_id})).all()
+            pairs |= {(lab_id, sample_id) for lab_id, sample_id in rows}
+
     done = 0
-    for e in r.json():
-        if e["status"]["status_name"] != "Approved":
+    for lab_id, sample_id in pairs:
+        if lab_id not in user_by_lab:
             continue
-        email = email_by_lab.get(e["lab_id"])
-        if email not in users:
-            continue
-        rr = await c.put(f"/enrollments/receive-samples/{e['id']}", json={
-            "user_id": users[email],
-            "samples_received_at": when.isoformat() + "T09:00:00"})
+        # recorded on the lab's behalf by a coordinator (user 1): a person who
+        # registered several schemes is tied to only one of their laboratories
+        rr = await c.post("/sample-receipts", json={
+            "user_id": 1, "pt_cycle_id": cycle_id, "lab_id": lab_id,
+            "method_sample_id": sample_id, "date_received": when.isoformat(),
+            "condition": "Suitable", "temperature_c": 4.0,
+            "comments": "Received in good condition"})
         if rr.status_code != 200:
-            fail(f"receive {e['id']}", rr)
+            fail(f"receipt lab {lab_id} sample {sample_id}", rr)
             continue
         done += 1
-    note(f"{done} panel(s) marked received")
+    note(f"{done} sample receipt(s) recorded")
 
 
 # a spread of results that exercises every branch of the form
@@ -707,7 +835,8 @@ async def capture_eid_results(c, cycle_id, users, labs, received_on, tested_on,
     """The same walk as the other forms, against the EID form."""
     r = await c.get("/hiv-eid-results/list", params={"pt_cycle_id": cycle_id})
     sheets = r.json()
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    email_by_lab = {lab["lab_id"]: lab["email"] for lab in labs}
+    name_by_email = {lab["email"]: lab["name"] for lab in labs}
 
     by_lab = {}
     for sheet in sheets:
@@ -751,7 +880,7 @@ async def capture_eid_results(c, cycle_id, users, labs, received_on, tested_on,
                 "stage", "status", "user", "scheme", "laboratory", "service",
                 "enrollment", "ptcycle", "method", "methodsample")}
             body.update(
-                user_id=users[email],
+                user_id=1,
                 date_tested=tested_on.isoformat() if reported == "Yes" else None,
                 detection_assay=detection if reported == "Yes" else None,
                 extraction_assay=extraction if reported == "Yes" else None,
@@ -764,7 +893,7 @@ async def capture_eid_results(c, cycle_id, users, labs, received_on, tested_on,
                 ic_qs_value=(round(30.0 + spread(lab_id, i, 0.3), 2)
                              if reported == "Yes" else None),
                 not_tested_reason=reason,
-                tested_by=labs[email]["name"].split()[0] + " Technologist",
+                tested_by=name_by_email.get(email, "").split()[0] + " Technologist",
                 supervisor_name="Laboratory In-charge",
                 status_id=assist.STATUS_DRAFT if as_draft else assist.STATUS_SUBMITTED,
                 stage_id=(assist.APPROVAL_STAGE_AWAIT_SUBMISSION if as_draft
@@ -815,7 +944,8 @@ async def capture_vl_results(c, cycle_id, users, labs, received_on, tested_on,
     """The same walk as the TB results, against the HIV-1 viral load form."""
     r = await c.get("/hiv-vl-results/list", params={"pt_cycle_id": cycle_id})
     sheets = r.json()
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    email_by_lab = {lab["lab_id"]: lab["email"] for lab in labs}
+    name_by_email = {lab["email"]: lab["name"] for lab in labs}
 
     by_lab = {}
     for sheet in sheets:
@@ -851,14 +981,14 @@ async def capture_vl_results(c, cycle_id, users, labs, received_on, tested_on,
                 body["viral_load_log10"] = round(max(value, 0.0), 2)
 
             body.update(
-                user_id=users[email],
+                user_id=1,
                 date_tested=tested_on.isoformat() if tested else None,
                 detection_assay=detection if tested else None,
                 extraction_assay=extraction if tested else None,
                 assay_kit_lot_number=f"LOT-{2600 + lab_id}" if tested else None,
                 assay_kit_expiry_date="2027-06-30" if tested else None,
                 assay_serial_number=f"SN-{9000 + lab_id}" if tested else None,
-                tested_by=labs[email]["name"].split()[0] + " Technologist",
+                tested_by=name_by_email.get(email, "").split()[0] + " Technologist",
                 supervisor_name="Laboratory In-charge",
                 status_id=assist.STATUS_DRAFT if as_draft else assist.STATUS_SUBMITTED,
                 stage_id=(assist.APPROVAL_STAGE_AWAIT_SUBMISSION if as_draft
@@ -933,7 +1063,8 @@ async def capture_xdr_results(c, cycle_id, users, labs, tested_on, submit=True,
     """The same walk as the Ultra results, against the XDR form."""
     r = await c.get("/tb-xpert-xdr-results/list", params={"pt_cycle_id": cycle_id})
     sheets = r.json()
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    email_by_lab = {lab["lab_id"]: lab["email"] for lab in labs}
+    name_by_email = {lab["email"]: lab["name"] for lab in labs}
 
     by_lab = {}
     for sheet in sheets:
@@ -959,7 +1090,7 @@ async def capture_xdr_results(c, cycle_id, users, labs, tested_on, submit=True,
                 body["inh_result"] = "NOT DETECTED"
 
             body.update(
-                user_id=users[email],
+                user_id=1,
                 date_tested=tested_on.isoformat(),
                 status_id=assist.STATUS_DRAFT if as_draft else assist.STATUS_SUBMITTED,
                 stage_id=(assist.APPROVAL_STAGE_AWAIT_SUBMISSION if as_draft
@@ -993,7 +1124,8 @@ async def capture_results(c, cycle_id, users, labs, tested_on, submit=True,
                           approve=False, leave_last_draft=False):
     r = await c.get(f"/tb-xpert-ultra-results/list", params={"pt_cycle_id": cycle_id})
     sheets = r.json()
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    email_by_lab = {lab["lab_id"]: lab["email"] for lab in labs}
+    name_by_email = {lab["email"]: lab["name"] for lab in labs}
 
     by_lab = {}
     for s in sheets:
@@ -1022,7 +1154,7 @@ async def capture_results(c, cycle_id, users, labs, tested_on, submit=True,
                 }[body["tb_detection_result"]]
 
             body.update(
-                user_id=users[email],
+                user_id=1,
                 date_tested=tested_on.isoformat(),
                 xpert_module_number=f"A{(i % 4) + 1}",
                 status_id=assist.STATUS_DRAFT if as_draft else assist.STATUS_SUBMITTED,
@@ -1087,7 +1219,8 @@ async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
     """The same walk as the other forms, against the bacteriology worksheet."""
     r = await c.get("/bacteriology-results/list", params={"pt_cycle_id": cycle_id})
     sheets = r.json()
-    email_by_lab = {v["id"]: k for k, v in labs.items()}
+    email_by_lab = {lab["lab_id"]: lab["email"] for lab in labs}
+    name_by_email = {lab["email"]: lab["name"] for lab in labs}
 
     by_lab = {}
     for sheet in sheets:
@@ -1137,7 +1270,7 @@ async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
                 "stage", "status", "user", "scheme", "laboratory", "service",
                 "enrollment", "ptcycle", "method", "methodsample")}
             body.update(
-                user_id=users[email],
+                user_id=1,
                 date_samples_received=received_on.isoformat(),
                 receipt_temperature=round(5.0 + spread(lab_id, i, 0.5), 1),
                 sample_condition="Unsuitable" if not_done else "Suitable",
@@ -1158,7 +1291,7 @@ async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
                 ast_mic_method_other=None,
                 astresult=rows,
                 comments=None,
-                reported_by=labs[email]["name"].split()[0] + " Technologist",
+                reported_by=name_by_email.get(email, "").split()[0] + " Technologist",
                 reported_on=tested_on.isoformat(),
                 reviewed_by="Laboratory In-charge",
                 reviewed_on=tested_on.isoformat(),
@@ -1191,12 +1324,30 @@ async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
 
 
 async def backdate(cycle_id, effective, closing, shipping, reports):
-    """Pulls a finished cycle's dates into the past so it reads as historical."""
+    """Pulls a cycle's dates into the past so it reads as historical.
+
+    Writes the full seven-date schedule (the test window and due date are
+    derived the same way make_cycle does) and refreshes the cached lifecycle
+    status, since listings read the stored status rather than recomputing it.
+    The manual gates are left as they are, so a published round stays published.
+    """
+    from sqlalchemy.future import select
+    from models.ptcycle_model import PTCycleDB
+
+    sched = _full_schedule(effective, closing, shipping, reports)
     async with database.AsyncSessionLocal() as db:
         await db.execute(text(
-            "UPDATE pt_cycles SET effective_date=:e, closing_date=:c, "
-            "shipping_date=:s, reports_availability_date=:r WHERE id=:id"),
-            {"e": effective, "c": closing, "s": shipping, "r": reports, "id": cycle_id})
+            "UPDATE pt_cycles SET effective_date=:effective_date, "
+            "closing_date=:closing_date, shipping_date=:shipping_date, "
+            "test_event_start_date=:test_event_start_date, "
+            "test_event_stop_date=:test_event_stop_date, "
+            "result_submission_due_date=:result_submission_due_date, "
+            "reports_availability_date=:reports_availability_date WHERE id=:id"),
+            {**{k: date.fromisoformat(v) for k, v in sched.items()}, "id": cycle_id})
+        cyc = (await db.execute(
+            select(PTCycleDB).where(PTCycleDB.id == cycle_id))).scalars().first()
+        if cyc:
+            cyc.pt_cyle_status_id = assist.compute_pt_cycle_status(cyc)
         await db.commit()
 
 
@@ -1215,8 +1366,8 @@ async def resolve_grader():
 async def workflow():
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://seed", timeout=60) as c:
-        labs = await register_labs(c)
-        users = await approve_labs(c, labs)
+        labs, users = await register_labs(c)
+        await approve_labs(c, labs)
 
         active = [e for e in users]
 
@@ -1227,7 +1378,7 @@ async def workflow():
                               TODAY + timedelta(days=50), TODAY + timedelta(days=90))
         if c1:
             await advance(c, c1, assist.PT_CYCLE_STARTED, "2026-A")
-            await enrol(c, c1, labs, users, active)
+            await enrol(c, c1, 1, labs, users, active)
             await accept_enrolments(c, c1)
             await advance(c, c1, assist.PT_CYCLE_SAMPLES_SHIPPED, "2026-A")
             await receive_all(c, c1, users, labs, TODAY - timedelta(days=120))
@@ -1236,7 +1387,6 @@ async def workflow():
             await capture_xdr_results(c, c1, users, labs, TODAY - timedelta(days=110),
                                       submit=True, approve=True)
             await advance(c, c1, assist.PT_CYCLE_REPORT_AVAILABLE, "2026-A")
-            await advance(c, c1, assist.PT_CYCLE_CLOSED, "2026-A")
             await backdate(c1, TODAY - timedelta(days=200), TODAY - timedelta(days=160),
                            TODAY - timedelta(days=130), TODAY - timedelta(days=60))
 
@@ -1247,7 +1397,7 @@ async def workflow():
                               TODAY - timedelta(days=5), TODAY + timedelta(days=75))
         if c2:
             await advance(c, c2, assist.PT_CYCLE_STARTED, "2026-B")
-            await enrol(c, c2, labs, users, active)
+            await enrol(c, c2, 1, labs, users, active)
             # one lab's enrolment is deliberately still awaiting a decision
             await accept_enrolments(c, c2, skip_email="peter.zulu@kitwe.health.zm", labs=labs)
             await advance(c, c2, assist.PT_CYCLE_SAMPLES_SHIPPED, "2026-B")
@@ -1267,7 +1417,7 @@ async def workflow():
         if c3:
             await advance(c, c3, assist.PT_CYCLE_STARTED, "2027-A")
             # two labs have already put their names down
-            await enrol(c, c3, labs, users,
+            await enrol(c, c3, 1, labs, users,
                         ["musachoolwe@gmail.com", "jane@gmail.com"])
             note("the remaining labs can still enrol from My Enrolments")
 
@@ -1286,7 +1436,7 @@ async def workflow():
                               scheme_id=2)
         if v1:
             await advance(c, v1, assist.PT_CYCLE_STARTED, "VL-2026-A")
-            await enrol(c, v1, labs, users, active)
+            await enrol(c, v1, 2, labs, users, active)
             await accept_enrolments(c, v1)
             await advance(c, v1, assist.PT_CYCLE_SAMPLES_SHIPPED, "VL-2026-A")
             await receive_all(c, v1, users, labs, TODAY - timedelta(days=100))
@@ -1295,7 +1445,6 @@ async def workflow():
                                      TODAY - timedelta(days=95),
                                      submit=True, approve=True)
             await advance(c, v1, assist.PT_CYCLE_REPORT_AVAILABLE, "VL-2026-A")
-            await advance(c, v1, assist.PT_CYCLE_CLOSED, "VL-2026-A")
             await backdate(v1, TODAY - timedelta(days=180), TODAY - timedelta(days=140),
                            TODAY - timedelta(days=110), TODAY - timedelta(days=40))
 
@@ -1306,7 +1455,7 @@ async def workflow():
                               scheme_id=2)
         if v2:
             await advance(c, v2, assist.PT_CYCLE_STARTED, "VL-2026-B")
-            await enrol(c, v2, labs, users, active)
+            await enrol(c, v2, 2, labs, users, active)
             await accept_enrolments(c, v2)
             await advance(c, v2, assist.PT_CYCLE_SAMPLES_SHIPPED, "VL-2026-B")
             await receive_all(c, v2, users, labs, TODAY - timedelta(days=2))
@@ -1327,7 +1476,7 @@ async def workflow():
                               scheme_id=3)
         if e1:
             await advance(c, e1, assist.PT_CYCLE_STARTED, "EID-2026-A")
-            await enrol(c, e1, labs, users, active)
+            await enrol(c, e1, 3, labs, users, active)
             await accept_enrolments(c, e1)
             await advance(c, e1, assist.PT_CYCLE_SAMPLES_SHIPPED, "EID-2026-A")
             await receive_all(c, e1, users, labs, TODAY - timedelta(days=90))
@@ -1336,7 +1485,6 @@ async def workflow():
                                       TODAY - timedelta(days=86),
                                       submit=True, approve=True)
             await advance(c, e1, assist.PT_CYCLE_REPORT_AVAILABLE, "EID-2026-A")
-            await advance(c, e1, assist.PT_CYCLE_CLOSED, "EID-2026-A")
             await backdate(e1, TODAY - timedelta(days=170), TODAY - timedelta(days=130),
                            TODAY - timedelta(days=100), TODAY - timedelta(days=30))
 
@@ -1347,7 +1495,7 @@ async def workflow():
                               scheme_id=3)
         if e2:
             await advance(c, e2, assist.PT_CYCLE_STARTED, "EID-2026-B")
-            await enrol(c, e2, labs, users, active)
+            await enrol(c, e2, 3, labs, users, active)
             await accept_enrolments(c, e2)
             await advance(c, e2, assist.PT_CYCLE_SAMPLES_SHIPPED, "EID-2026-B")
             await receive_all(c, e2, users, labs, TODAY - timedelta(days=2))
@@ -1377,7 +1525,7 @@ async def workflow():
                               scheme_id=4)
         if b1:
             await advance(c, b1, assist.PT_CYCLE_STARTED, "BACT-01-2026")
-            await enrol(c, b1, labs, users, active)
+            await enrol(c, b1, 4, labs, users, active)
             await accept_enrolments(c, b1)
             await advance(c, b1, assist.PT_CYCLE_SAMPLES_SHIPPED, "BACT-01-2026")
             await receive_all(c, b1, users, labs, TODAY - timedelta(days=90))
@@ -1386,7 +1534,6 @@ async def workflow():
                 TODAY - timedelta(days=90), TODAY - timedelta(days=80),
                 submit=True, approve=True)
             await advance(c, b1, assist.PT_CYCLE_REPORT_AVAILABLE, "BACT-01-2026")
-            await advance(c, b1, assist.PT_CYCLE_CLOSED, "BACT-01-2026")
             await backdate(b1, TODAY - timedelta(days=160), TODAY - timedelta(days=120),
                            TODAY - timedelta(days=95), TODAY - timedelta(days=30))
 
@@ -1397,7 +1544,7 @@ async def workflow():
                               scheme_id=4)
         if b2:
             await advance(c, b2, assist.PT_CYCLE_STARTED, "BACT-02-2026")
-            await enrol(c, b2, labs, users, active)
+            await enrol(c, b2, 4, labs, users, active)
             await accept_enrolments(c, b2)
             await advance(c, b2, assist.PT_CYCLE_SAMPLES_SHIPPED, "BACT-02-2026")
             await receive_all(c, b2, users, labs, TODAY - timedelta(days=3))

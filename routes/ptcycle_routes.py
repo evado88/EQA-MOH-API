@@ -56,6 +56,7 @@ from models.ptcycle_model import (
 from helpers import mailer
 from datetime import timedelta
 from sqlalchemy import text
+import os
 
 router = APIRouter(prefix="/pt-cycles", tags=["PTCycles"])
 
@@ -73,6 +74,63 @@ RESULT_MODEL_BY_FORM = {
 def _recompute_status(ptcycle: PTCycleDB):
     """Refresh the cached lifecycle status from the cycle's dates and gates."""
     ptcycle.pt_cyle_status_id = assist.compute_pt_cycle_status(ptcycle)
+
+
+# A testing convenience is only offered when explicitly switched on. Leave
+# ENABLE_DEV_TOOLS unset in production to keep the phase-jump endpoint off.
+DEV_TOOLS_ENABLED = os.environ.get("ENABLE_DEV_TOOLS", "1") != "0"
+
+# Lifecycle status is derived live from the seven schedule dates (see
+# assist.compute_pt_cycle_status), so the only way to put a cycle into a given
+# phase is to position those dates either side of "today". For each phase this
+# maps the seven dates, in schedule order, to a day offset from today that
+# lands the derived status exactly on that phase, together with the two manual
+# gates (samples shipped / reports published) that phase implies.
+_DEV_PHASE_OFFSETS = {
+    #                     eff  close  ship  tstart  tstop   due  reports
+    assist.PT_CYCLE_UPCOMING:         (  5,   15,   25,    35,    45,   55,   65),
+    assist.PT_CYCLE_ENROLMENT_OPEN:   ( -5,   15,   25,    35,    45,   55,   65),
+    assist.PT_CYCLE_ENROLMENT_CLOSED: (-25,   -5,    5,    15,    25,   35,   45),
+    assist.PT_CYCLE_SAMPLES_SHIPPED:  (-35,  -25,   -5,     5,    15,   25,   35),
+    assist.PT_CYCLE_TESTING:          (-45,  -35,  -25,    -5,    15,   25,   35),
+    assist.PT_CYCLE_RESULTS_DUE:      (-55,  -45,  -35,   -25,    -5,   15,   25),
+    assist.PT_CYCLE_REPORT_AVAILABLE: (-75,  -65,  -55,   -45,   -35,  -25,   -5),
+}
+
+# the schedule fields, in the order the offsets above are listed
+_DEV_DATE_FIELDS = (
+    "effective_date",
+    "closing_date",
+    "shipping_date",
+    "test_event_start_date",
+    "test_event_stop_date",
+    "result_submission_due_date",
+    "reports_availability_date",
+)
+
+
+def _apply_dev_phase(ptcycle: PTCycleDB, phase: int):
+    """Back-dates a cycle's schedule around today so its derived status lands on
+    `phase`, and sets the manual gates that phase implies. Testing only."""
+    today = assist.get_current_date().date()
+    offsets = _DEV_PHASE_OFFSETS[phase]
+
+    for field, offset in zip(_DEV_DATE_FIELDS, offsets):
+        setattr(ptcycle, field, today + timedelta(days=offset))
+
+    # a cycle can only sit in a lifecycle phase once it has been approved
+    ptcycle.status_id = assist.STATUS_APPROVED
+    ptcycle.stage_id = assist.APPROVAL_STAGE_APPROVED
+
+    shipped = phase >= assist.PT_CYCLE_SAMPLES_SHIPPED
+    published = phase == assist.PT_CYCLE_REPORT_AVAILABLE
+
+    ptcycle.samples_shipped = shipped
+    ptcycle.samples_shipped_at = assist.get_current_date(False) if shipped else None
+    ptcycle.reports_published = published
+    ptcycle.reports_published_at = assist.get_current_date(False) if published else None
+
+    _recompute_status(ptcycle)
 
 
 async def _reuse_participants(db: AsyncSession, ptcycle: PTCycleDB, source_id: int, user: UserDB):
@@ -418,6 +476,90 @@ async def publish_ptcycle_reports(
         message=message,
         pt_cycle_id=ptcycle.id,
         pt_cyle_status_id=ptcycle.pt_cyle_status_id,
+    )
+
+
+# --------------------------------------------------------------------------
+# Testing convenience
+# --------------------------------------------------------------------------
+@router.put("/dev-set-phase/{id}", response_model=PTCycleStatusChangeResult)
+async def dev_set_ptcycle_phase(
+    id: int, change: ParamPTCycleStatusChange, db: AsyncSession = Depends(get_db)
+):
+    """Jump a cycle straight to a lifecycle phase, for manual end-to-end testing.
+
+    Because status is derived from the schedule dates, there is otherwise no way
+    to exercise a phase without hand-editing those dates. This back-dates the
+    whole schedule around today so the derived status lands on the requested
+    phase, flips the manual gates (samples shipped / reports published) to match,
+    and - for any post-shipping phase - opens the result sheets so results can be
+    entered. It does NOT score the round; use /publish-reports or /evaluate for
+    scoring. Switched off unless ENABLE_DEV_TOOLS is enabled.
+    """
+    if not DEV_TOOLS_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="The phase-jump testing endpoint is disabled on this environment",
+        )
+
+    result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == id))
+    ptcycle = result.scalar_one_or_none()
+    if not ptcycle:
+        raise HTTPException(status_code=404, detail=f"Unable to find PT Cycle with id '{id}'")
+
+    user = await _get_admin_user(db, change.user_id)
+
+    phase = change.pt_cyle_status_id
+    if phase not in _DEV_PHASE_OFFSETS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unknown phase. Choose one of: "
+                + ", ".join(
+                    f"{pid}={assist.PT_CYCLE_STATUS_NAMES[pid]}"
+                    for pid in _DEV_PHASE_OFFSETS
+                )
+            ),
+        )
+
+    _apply_dev_phase(ptcycle, phase)
+    ptcycle.updated_by = user.email
+    cycle_id = ptcycle.id  # keep a handle; attributes expire after commit
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Unable to set the PT Cycle phase: {e}")
+
+    # from shipping onward there should be result sheets to enter against; open
+    # any that are missing, but do not fail the phase jump if there are none yet
+    enrollment_count = result_count = 0
+    sheet_note = ""
+    if phase >= assist.PT_CYCLE_SAMPLES_SHIPPED:
+        result = await db.execute(select(PTCycleDB).where(PTCycleDB.id == cycle_id))
+        fresh = result.scalar_one_or_none()
+        try:
+            enrollment_count, result_count = await _ship_samples(db, fresh, user)
+            await db.commit()
+            sheet_note = (
+                f" {result_count} result sheet(s) opened across "
+                f"{enrollment_count} enrolment(s)."
+            )
+        except HTTPException as e:
+            await db.rollback()
+            sheet_note = f" No result sheets opened: {e.detail}"
+
+    return PTCycleStatusChangeResult(
+        succeeded=True,
+        message=(
+            f"PT Cycle moved to '{assist.PT_CYCLE_STATUS_NAMES[phase]}'."
+            + sheet_note
+        ),
+        pt_cycle_id=cycle_id,
+        pt_cyle_status_id=phase,
+        enrollment_count=enrollment_count,
+        result_count=result_count,
     )
 
 
