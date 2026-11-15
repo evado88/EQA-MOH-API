@@ -1,0 +1,38 @@
+# EQA platform — Caddy site (alternative to nginx; try after the workshop)
+#
+# Single domain: SPA at / and the FastAPI backend under /api/ on the same host.
+# Caddy fetches and renews Let's Encrypt certificates automatically — no certbot.
+# Install: https://caddyserver.com/docs/install  (Debian/Ubuntu).
+# Put this at /etc/caddy/Caddyfile, open ports 80 and 443, ensure the DNS A
+# record for eqa.ims-zm.online exists, then: sudo systemctl reload caddy
+#
+# Run nginx OR Caddy, not both (both want ports 80/443). Stop nginx first:
+#   sudo systemctl disable --now nginx
+
+eqa.ims-zm.online {
+    encode gzip
+    root * /var/www/eqa/dist
+
+    # API under /api/* -> uvicorn, stripping the /api prefix
+    handle_path /api/* {
+        request_body {
+            max_size 25MB      # result-file attachments
+        }
+        reverse_proxy 127.0.0.1:8800
+    }
+
+    # uploaded files served by the backend (keep the /static path)
+    handle /static/* {
+        reverse_proxy 127.0.0.1:8800
+    }
+
+    # cache content-hashed build assets hard
+    @assets path /assets/*
+    header @assets Cache-Control "public, immutable, max-age=31536000"
+
+    # single-page app fallback for everything else
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}

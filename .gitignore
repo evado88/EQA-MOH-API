@@ -6,5 +6,10 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
-*.db    
+*.db
 docs/session-transcript-2026-09-14.md
+
+# local environment / secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example

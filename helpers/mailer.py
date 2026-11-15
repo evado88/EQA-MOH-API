@@ -13,29 +13,28 @@ or production setting:
     MAIL_APP_BASE_URL   - where the React client is served, for building links
     MAIL_SUPPRESS_SEND  - "1" to skip the actual SMTP send (dev/offline)
 
-SECURITY NOTE: the default password below is a Gmail *app password*. It is a
-credential; do not commit real credentials to a public repository. Move these
-to the environment (or a secret store) before this leaves local development.
+SECURITY NOTE: MAIL_PASSWORD is a Gmail *app password* - a live credential. It
+has no in-code default and must be supplied through the environment (.env in
+dev, a secret store in production). See .env.example.
 """
-import os
 import smtplib
 import ssl
 from email.message import EmailMessage
 
 from starlette.concurrency import run_in_threadpool
 
-
-def _env(name: str, default: str) -> str:
-    value = os.environ.get(name)
-    return value if value not in (None, "") else default
+# the shared loader reads .env (if present) before any value below is resolved
+from helpers.env import env as _env
 
 
 # --- SMTP account -----------------------------------------------------------
 MAIL_HOST = _env("MAIL_HOST", "smtp.gmail.com")
 MAIL_PORT = int(_env("MAIL_PORT", "587"))
 MAIL_USERNAME = _env("MAIL_USERNAME", "zebrapp2000@gmail.com")
-# Gmail app password (16 chars, spaces are ignored by Gmail but we strip anyway)
-MAIL_PASSWORD = _env("MAIL_PASSWORD", "utys nasu oqfw xqdg").replace(" ", "")
+# Gmail app password (16 chars, spaces are ignored by Gmail but we strip anyway).
+# No in-code default: this is a live credential and must be set in the
+# environment (.env in dev). Sending is skipped when it is unset.
+MAIL_PASSWORD = _env("MAIL_PASSWORD", "").replace(" ", "")
 MAIL_FROM = _env("MAIL_FROM", MAIL_USERNAME)
 MAIL_FROM_NAME = _env("MAIL_FROM_NAME", "Zambia EQA Platform")
 MAIL_USE_TLS = _env("MAIL_USE_TLS", "1") == "1"
@@ -43,8 +42,10 @@ MAIL_USE_TLS = _env("MAIL_USE_TLS", "1") == "1"
 # where the client lives, so verification links point at a real page
 APP_BASE_URL = _env("MAIL_APP_BASE_URL", "http://localhost:5173").rstrip("/")
 
-# set to "1" to skip the real send - the link is still printed to the console
-SUPPRESS_SEND = _env("MAIL_SUPPRESS_SEND", "0") == "1"
+# set to "1" to skip the real send - the link is still printed to the console.
+# with no password configured there is nothing to send with, so suppress too
+# rather than fail (keeps local dev working without SMTP credentials)
+SUPPRESS_SEND = _env("MAIL_SUPPRESS_SEND", "0") == "1" or not MAIL_PASSWORD
 
 
 def verification_link(token: str) -> str:

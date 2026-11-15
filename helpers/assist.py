@@ -4,12 +4,16 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import calendar
+from helpers.env import env
 
-INFOBIP_API_URL = "https://xk85nl.api.infobip.com/whatsapp/1/message/template"
-INFOBIP_API_TOKEN = (
-    "05704a467eaab51ea1bd2aabaa652517-c006af8e-55e6-4254-aa46-440344a6e040"
+# WhatsApp (Infobip) - the token is a live credential, so it comes from the
+# environment; the URL and sender default to the configured account
+INFOBIP_API_URL = env(
+    "INFOBIP_API_URL",
+    "https://xk85nl.api.infobip.com/whatsapp/1/message/template",
 )
-INFOBIP_PHONE_NUMBER = "12098869548"
+INFOBIP_API_TOKEN = env("INFOBIP_API_TOKEN", "")
+INFOBIP_PHONE_NUMBER = env("INFOBIP_PHONE_NUMBER", "12098869548")
 
 USER_MEMBER = 1
 USER_ADMIN = 2
@@ -389,9 +393,11 @@ def scheme_scope_for(user) -> "int | None":
         return getattr(user, "scheme_id", None)
     return None
 
-SECRET_KEY = "your-secret-key"
-ALGORITHM = "HS256"
-CURRENT_TIME_ZONE = "Africa/Lusaka"
+# JWT signing - the secret is a live credential and must come from the
+# environment in any shared or production setting
+SECRET_KEY = env("SECRET_KEY", "your-secret-key")
+ALGORITHM = env("ALGORITHM", "HS256")
+CURRENT_TIME_ZONE = env("CURRENT_TIME_ZONE", "Africa/Lusaka")
 
 STATUS_DRAFT = 1
 STATUS_SUBMITTED = 2

@@ -49,12 +49,19 @@ async def lifespan(app: FastAPI):
     # Shutdown logic
     print("Application shutting down new...")
 
+# allowed browser origins come from the environment so the deployed server can
+# be set without a code change. CORS_ORIGINS is a comma-separated list; the
+# default keeps local development working. Set it to the public frontend URL on
+# the server, e.g. CORS_ORIGINS=https://eqa.example.org
+from helpers.env import env as _env, env_bool as _env_bool
 origins = [
-        "http://localhost",
-        "http://localhost:5173",
-        "http://10.222.192.196:5173",
-        "https://your-frontend-domain.com",
-    ]
+    o.strip()
+    for o in _env(
+        "CORS_ORIGINS",
+        "http://localhost,http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]
 
 
 app = FastAPI(title="App Routes [FastAPI/PostgreSQL]")
@@ -130,15 +137,23 @@ async def startup():
         print("Application starting up old...")
         await conn.run_sync(Base.metadata.create_all)
 
-    # daily in-app scheduler for PT cycle reminders / status refresh
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    scheduler = AsyncIOScheduler(timezone="Africa/Lusaka")
-    scheduler.add_job(
-        _daily_pt_cycle_job, "cron", hour=7, minute=0,
-        id="pt_cycle_reminders", replace_existing=True,
-    )
-    scheduler.start()
-    app.state.scheduler = scheduler
+    # daily in-app scheduler for PT cycle reminders / status refresh.
+    # Gated by RUN_SCHEDULER so that when the API is run with several uvicorn
+    # workers the job does not fire once per worker (which would send duplicate
+    # reminder emails): set RUN_SCHEDULER=0 on the multi-worker web service and
+    # run exactly one process with RUN_SCHEDULER=1. Default on (single worker).
+    if _env_bool("RUN_SCHEDULER", True):
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        scheduler = AsyncIOScheduler(timezone=_env("CURRENT_TIME_ZONE", "Africa/Lusaka"))
+        scheduler.add_job(
+            _daily_pt_cycle_job, "cron", hour=7, minute=0,
+            id="pt_cycle_reminders", replace_existing=True,
+        )
+        scheduler.start()
+        app.state.scheduler = scheduler
+        print("[scheduler] pt-cycle reminder job scheduled (07:00 daily)")
+    else:
+        print("[scheduler] disabled on this process (RUN_SCHEDULER=0)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
