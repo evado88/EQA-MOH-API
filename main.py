@@ -39,6 +39,7 @@ from routes import facility_routes
 from routes import registration_routes
 from routes import result_submission_routes
 from routes import samplereceipt_routes
+from routes import shipmentreceipt_routes
 from routes import result_navigation_routes
 
 @asynccontextmanager
@@ -112,6 +113,7 @@ app.include_router(facility_routes.router)
 app.include_router(registration_routes.router)
 app.include_router(result_submission_routes.router)
 app.include_router(samplereceipt_routes.router)
+app.include_router(shipmentreceipt_routes.router)
 app.include_router(result_navigation_routes.router)
 
 

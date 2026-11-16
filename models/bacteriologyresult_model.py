@@ -286,12 +286,11 @@ RECEIPT_LABELS = {
     "date_submitted": "Date of Submission",
 }
 
-# the worksheet is submitted per specimen, so this is what a worked specimen
-# has to carry before a reviewer can grade it
-REQUIRED_ON_SUBMIT = [
-    "date_samples_received",
-    "sample_condition",
-]
+# Sample receipt details (date received, condition, temperature) are now
+# captured once per sample in the shared sample_receipts table and enforced at
+# the route by receipt_exists(), so they are no longer required on the worksheet
+# row itself. Kept as a list for any future worksheet-level submit requirement.
+REQUIRED_ON_SUBMIT = []
 
 # swabs travel at 2-8 degrees; a reading far outside that is a typing slip
 # rather than a cold chain excursion, so the field is bounded but generously

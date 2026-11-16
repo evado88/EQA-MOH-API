@@ -61,17 +61,16 @@ class SampleReceipt(BaseModel):
 
 
 class ParamSampleReceipt(BaseModel):
-    """Posted by a lab to record (or correct) a sample's receipt details before
-    entering results for that sample."""
+    """Posted by a lab to record (or correct) a single sample's condition before
+    entering results for that sample. The shipment's arrival details (date,
+    temperature) are recorded once per package on shipment_receipts."""
 
     user_id: int = Field(..., ge=1)
     pt_cycle_id: int = Field(..., ge=1)
     lab_id: int = Field(..., ge=1)
     method_sample_id: int = Field(..., ge=1)
 
-    date_received: date = Field(..., description="Date the sample was received")
     condition: str = Field(..., description=f"One of {CONDITIONS}")
-    temperature_c: float = Field(..., description="Temperature on receipt (°C)")
     comments: Optional[str] = None
 
     @root_validator

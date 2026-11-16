@@ -782,15 +782,26 @@ async def receive_all(c, cycle_id, users, labs, when):
             pairs |= {(lab_id, sample_id) for lab_id, sample_id in rows}
 
     done = 0
+    shipment_done: set = set()
     for lab_id, sample_id in pairs:
         if lab_id not in user_by_lab:
             continue
         # recorded on the lab's behalf by a coordinator (user 1): a person who
         # registered several schemes is tied to only one of their laboratories
+        # the package arrives once, so the shipment receipt is recorded once per lab
+        if lab_id not in shipment_done:
+            sr = await c.post("/shipment-receipts", json={
+                "user_id": 1, "pt_cycle_id": cycle_id, "lab_id": lab_id,
+                "date_received": when.isoformat(), "temperature_c": 4.0,
+                "comments": "Received in good condition"})
+            if sr.status_code != 200:
+                fail(f"shipment receipt lab {lab_id}", sr)
+                continue
+            shipment_done.add(lab_id)
+        # suitability is judged per sample
         rr = await c.post("/sample-receipts", json={
             "user_id": 1, "pt_cycle_id": cycle_id, "lab_id": lab_id,
-            "method_sample_id": sample_id, "date_received": when.isoformat(),
-            "condition": "Suitable", "temperature_c": 4.0,
+            "method_sample_id": sample_id, "condition": "Suitable",
             "comments": "Received in good condition"})
         if rr.status_code != 200:
             fail(f"receipt lab {lab_id} sample {sample_id}", rr)

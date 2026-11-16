@@ -298,12 +298,17 @@ async def run():
         check("results blocked before the sample's receipt is recorded",
               r.status_code == 400, r.text[:200])
 
+        sr = await c.post("/shipment-receipts", json={
+            "user_id": lab_user_id, "pt_cycle_id": cycle_id, "lab_id": lab_id,
+            "date_received": "2026-09-05", "temperature_c": 4.0, "comments": "ok"})
+        check("shipment receipt recorded", sr.status_code == 200, sr.text[:200])
+
         received = 0
         for s in sheets + xdr_sheets:
             rr = await c.post("/sample-receipts", json={
                 "user_id": lab_user_id, "pt_cycle_id": cycle_id, "lab_id": lab_id,
-                "method_sample_id": s["method_sample_id"], "date_received": "2026-09-05",
-                "condition": "Suitable", "temperature_c": 4.0, "comments": "ok"})
+                "method_sample_id": s["method_sample_id"],
+                "condition": "Suitable", "comments": "ok"})
             received += 1 if rr.status_code == 200 else 0
         check("receipts recorded for every sample", received == 10, received)
 
