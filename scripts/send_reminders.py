@@ -24,12 +24,18 @@ same configuration as the running API, so it talks to the real database and
 (unless --dry-run) sends through the real mailer.
 """
 import asyncio
+import os
 import sys
 
-# imported after nothing special: database reads DATABASE_URL from the
-# environment (.env in the working directory), exactly like the API process
-from database import AsyncSessionLocal
-from routes.ptcycle_routes import run_pt_cycle_reminders
+# make the project root importable when run directly as
+# `python scripts/send_reminders.py` (Python would otherwise only put the
+# scripts/ directory on the path). The systemd unit also sets PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# database reads DATABASE_URL from the environment (.env in the working
+# directory), exactly like the API process
+from database import AsyncSessionLocal  # noqa: E402
+from routes.ptcycle_routes import run_pt_cycle_reminders  # noqa: E402
 
 
 async def main_(dry_run=False):
