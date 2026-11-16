@@ -35,6 +35,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # database reads DATABASE_URL from the environment (.env in the working
 # directory), exactly like the API process
 from database import AsyncSessionLocal  # noqa: E402
+
+# importing the app registers every route and therefore every ORM model, so the
+# SQLAlchemy mapper registry is complete before the first query. Without this a
+# relationship resolved by name at configure time (e.g. StageDB -> AnnouncementDB)
+# fails with "failed to locate a name". The app is not started - only imported.
+import main  # noqa: E402,F401
+
 from routes.ptcycle_routes import run_pt_cycle_reminders  # noqa: E402
 
 
