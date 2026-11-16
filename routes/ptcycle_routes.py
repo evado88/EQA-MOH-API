@@ -812,12 +812,17 @@ async def list_ptcycle_documents(id: int, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-async def run_pt_cycle_reminders(db: AsyncSession):
+async def run_pt_cycle_reminders(db: AsyncSession, dry_run: bool = False):
     """Send any date reminders that fall due today, and refresh cached statuses.
 
     Idempotent: each (cycle, date, lead) reminder is recorded once in
     pt_cycle_reminders and never sent again. Enrolment-opening reminders go to
     every approved lab in the scheme; all other dates go to the enrolled labs.
+
+    dry_run=True previews without side effects: it computes exactly what would
+    be sent (and to whom - recipient emails are added to each detail line) but
+    sends no email, records nothing, and rolls back, so a later real run still
+    sends everything. Use it to see what a run would do before firing it.
     """
     today = assist.get_current_date().date()
     details = []
@@ -856,18 +861,27 @@ async def run_pt_cycle_reminders(db: AsyncSession):
                     continue
 
                 recipients = await _reminder_recipients(db, cycle, field)
-                await _send_reminders(cycle, field, lead, when, recipients)
-                await db.execute(
-                    text(
-                        "INSERT INTO pt_cycle_reminders (pt_cycle_id, reminder_key, recipients) "
-                        "VALUES (:c, :k, :n)"
-                    ),
-                    {"c": cycle.id, "k": key, "n": len(recipients)},
-                )
+                if not dry_run:
+                    await _send_reminders(cycle, field, lead, when, recipients)
+                    await db.execute(
+                        text(
+                            "INSERT INTO pt_cycle_reminders (pt_cycle_id, reminder_key, recipients) "
+                            "VALUES (:c, :k, :n)"
+                        ),
+                        {"c": cycle.id, "k": key, "n": len(recipients)},
+                    )
                 sent += 1
-                details.append(f"{cycle.name}: {field} (-{lead}d) -> {len(recipients)} lab(s)")
+                line = f"{cycle.name}: {field} (-{lead}d) -> {len(recipients)} lab(s)"
+                if dry_run and recipients:
+                    line += " [" + ", ".join(recipients) + "]"
+                details.append(line)
 
-    await db.commit()
+    # a preview leaves no trace: discard the status refresh too, so nothing is
+    # committed and the next real run still sends everything
+    if dry_run:
+        await db.rollback()
+    else:
+        await db.commit()
     return PTCycleReminderResult(
         succeeded=True, cycles_checked=len(cycles), reminders_sent=sent, details=details
     )
