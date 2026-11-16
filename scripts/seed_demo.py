@@ -5,6 +5,12 @@ directly. Everything that has a workflow attached - registration, application
 review, cycle status, enrolment, shipping, result capture - is driven through
 the API, so the demo data is by construction exactly what the running system
 produces.
+
+Usage (always targets the local dev database, never production):
+    python scripts/seed_demo.py            rebuild the full demo dataset
+    python scripts/seed_demo.py --clear    wipe demo data only, no reseeding
+                                           (catalogue and provider staff kept,
+                                           ready for manual testing)
 """
 import asyncio
 import os
@@ -1968,10 +1974,26 @@ def _moment(value):
     ).isoformat()
 
 
-async def main_():
+async def main_(clear_only=False):
+    # the clean slate every run starts from: transactional data wiped, the
+    # catalogue and provider staff rebuilt
     await reset()
     await staff()
     await catalogue()
+
+    if clear_only:
+        # stop here - an empty transactional layer on top of the catalogue and
+        # staff, ready for manual end-to-end testing from scratch
+        if FAILURES:
+            print("\n" + "!" * 72)
+            print(f"{len(FAILURES)} step(s) failed:")
+            for f in FAILURES:
+                print("  -", f)
+            return 1
+        print("\nDemo data cleared. Catalogue and provider staff kept; no demo "
+              "labs, cycles or results seeded.")
+        return 0
+
     await resolve_grader()
     await workflow()
     await noticeboard()
@@ -1987,4 +2009,7 @@ async def main_():
     return 0
 
 
-sys.exit(asyncio.run(main_()))
+# `--clear` (or `--clear-only`) wipes the demo data without reseeding it;
+# with no argument the full demo dataset is rebuilt.
+_CLEAR_ONLY = any(a in ("--clear", "--clear-only") for a in sys.argv[1:])
+sys.exit(asyncio.run(main_(clear_only=_CLEAR_ONLY)))

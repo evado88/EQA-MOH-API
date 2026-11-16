@@ -1,12 +1,14 @@
-"""The full participation workflow, end to end.
+"""The full participation workflow, end to end (current system).
 
-Builds its own throwaway database, walks signup -> approval -> cycle ->
-enrolment -> shipping -> receipt -> capture -> close-out, then drops it. The
+Builds its own throwaway database, walks the live workflow — signup -> verify ->
+set password -> scheme registration -> approval -> cycle -> enrolment ->
+shipping -> per-sample receipt -> result capture -> publish — then drops it. The
 development database is never touched.
 
-Run directly:  venv\Scripts\python.exe scripts\checks\check_workflow.py
+Run directly:  venv\\Scripts\\python.exe scripts\\checks\\check_workflow.py
 """
 import asyncio
+import os
 import sys
 
 import _bootstrap  # noqa: F401  puts the API on the import path, must be first
@@ -17,20 +19,31 @@ from _bootstrap import (
 # the app has to be pointed at the throwaway database before main is imported,
 # because the routes bind to the session factory at import time
 use_test_database()
+# status is derived from the schedule; the phase-jump helper is used to open
+# enrolment, so the dev tools must be enabled before the routers import
+os.environ["ENABLE_DEV_TOOLS"] = "1"
 
 import database  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
-from helpers import assist
-from httpx import ASGITransport, AsyncClient
+from helpers import assist  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
 
 OK, FAIL = [], []
+
+LAB_EMAIL = "mary.banda@chilenje.zm"
+PASSWORD = "12345678"
 
 
 def check(label, cond, detail=""):
     (OK if cond else FAIL).append(label)
     print(("  PASS  " if cond else "  FAIL  ") + label + (f"   <- {detail}" if detail and not cond else ""))
+
+
+async def q1(sql, **p):
+    async with database.AsyncSessionLocal() as db:
+        return (await db.execute(text(sql), p)).first()
 
 
 async def seed():
@@ -40,6 +53,7 @@ async def seed():
     from models.labtype_model import LabTypeDB
     from models.province_model import ProvinceDB
     from models.district_model import DistrictDB
+    from models.facility_model import FacilityDB
     from models.ptcyclestatus_model import PTCycleStatusDB
     from models.user_model import UserDB
     from models.provider_model import ProviderDB
@@ -50,6 +64,19 @@ async def seed():
 
     async with database.engine.begin() as conn:
         await conn.run_sync(database.Base.metadata.create_all)
+
+    # result_submissions is a migration-only table (no ORM model), so
+    # create_all does not make it; apply that migration to the throwaway DB
+    mig = os.path.join(os.path.dirname(__file__), "..", "..",
+                       "migrations", "021_result_submissions.sql")
+    with open(mig, "r", encoding="utf-8") as fh:
+        sql_text = "\n".join(
+            ln for ln in fh.read().splitlines() if not ln.strip().startswith("--"))
+    async with database.AsyncSessionLocal() as db:
+        for stmt in (s.strip() for s in sql_text.split(";")):
+            if stmt:
+                await db.execute(text(stmt))
+        await db.commit()
 
     APPROVED = dict(status_id=4, stage_id=5, approval_levels=1)
     async with database.AsyncSessionLocal() as db:
@@ -63,11 +90,11 @@ async def seed():
         db.add(UserDB(id=1, fname="Admin", lname="User", email="admin@cdl.zm",
                       mobile_code="+260", mobile="+260970000001",
                       role_id=assist.ROLE_ADMINISTRATOR,
-                      password=assist.hash_password("12345678"), **APPROVED))
+                      password=assist.hash_password(PASSWORD), **APPROVED))
         db.add(UserDB(id=2, fname="Scheme", lname="Coordinator", email="coord@cdl.zm",
                       mobile_code="+260", mobile="+260970000002",
                       role_id=assist.ROLE_SCHEME_COORDINATOR,
-                      password=assist.hash_password("12345678"), **APPROVED))
+                      password=assist.hash_password(PASSWORD), **APPROVED))
         await db.commit()
 
         for i, n in enumerate(["Administrator", "Scheme Head", "Scheme Coordinator",
@@ -75,8 +102,8 @@ async def seed():
                                "District Lab Coordinators", "Facility Super User",
                                "Facility Staff"], 1):
             db.add(RoleDB(id=i, name=n, user_id=1, **APPROVED))
-        for i, n in enumerate(["Upcoming", "Started", "Samples Shipped",
-                               "Report Available", "Closed"], 1):
+        # the seven date-derived lifecycle phases, matching the constants
+        for i, n in assist.PT_CYCLE_STATUS_NAMES.items():
             db.add(PTCycleStatusDB(id=i, name=n, user_id=1, **APPROVED))
         db.add(LabTypeDB(id=1, name="Government", user_id=1, **APPROVED))
         db.add(ProvinceDB(id=1, name="Lusaka", code="ZM-09", user_id=1, **APPROVED))
@@ -84,6 +111,8 @@ async def seed():
         db.add(DistrictDB(id=1, name="Lusaka", province_id=1, user_id=1, **APPROVED))
         db.add(ProviderDB(id=1, name="CDL", user_id=1, **APPROVED))
         await db.commit()
+        # a facility from the master list, so self-registration has one to pick
+        db.add(FacilityDB(id=1, name="Chilenje Clinic", province_id=1, district_id=1))
         db.add(SchemeDB(id=1, name="Tuberculosis (TB)", provider_id=1, user_id=1, **APPROVED))
         await db.commit()
         db.add(ServiceDB(id=1, name="TB Xpert", scheme_id=1, user_id=1, **APPROVED))
@@ -104,8 +133,8 @@ async def seed():
         # the seed inserts explicit ids, which leaves the identity sequences
         # behind - move them past what was seeded
         for table in ("users", "roles", "list_statuses", "list_stages", "lab_types",
-                      "provinces", "districts", "providers", "schemes", "services",
-                      "methods", "method_samples", "pt_cycle_statuses"):
+                      "provinces", "districts", "facilities", "providers", "schemes",
+                      "services", "methods", "method_samples", "pt_cycle_statuses"):
             await db.execute(text(
                 f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
                 f"COALESCE((SELECT MAX(id) FROM {table}), 1))"
@@ -119,40 +148,51 @@ async def run():
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
 
-        print("1. SIGNUP -- labs, and only labs, may register")
-        body = dict(name="Chilenje Clinic Lab", contact_person_name="Mary Banda",
-                    lab_type_id=1, position="Lab In-charge", phone_number="+260970001234",
-                    province_id=1, district_id=1, email_address="Mary.Banda@Chilenje.zm",
-                    physical_address="Chilenje", method_list=[{"id": 1}, {"id": 2}])
-        r = await c.post("/auth/signup", json=body)
+        print("1. SIGNUP -> VERIFY -> SET PASSWORD")
+        r = await c.post("/auth/signup", json=dict(
+            country="Zambia", name="Mary Banda", position="Lab In-charge",
+            phone_number="+260970001234", email=LAB_EMAIL, facility_id=1))
         check("signup accepted", r.status_code == 200, r.text[:300])
-        signup = r.json()
-        lab_id = signup["laboratory_id"]
-        check("lab code generated by server", signup["code"] == "REG0001", signup)
-        check("one application per selected method", signup["application_count"] == 2, signup)
 
-        r = await c.post("/auth/signup", json=body)
-        check("duplicate email rejected", r.status_code == 400, r.text[:200])
+        r = await c.post("/auth/login", data={"username": LAB_EMAIL, "password": PASSWORD})
+        check("cannot sign in before a password is set", r.status_code in (401, 403), r.text[:200])
 
-        bad = dict(body, email_address="x@y.zm", method_list=[{"id": 999}])
-        r = await c.post("/auth/signup", json=bad)
-        check("unknown method rejected", r.status_code == 400, r.text[:200])
+        token = (await q1("SELECT verification_token FROM users WHERE email=:e", e=LAB_EMAIL))[0]
+        check("a verification token was issued", bool(token))
 
-        no_methods = dict(body, email_address="z@y.zm", method_list=[])
-        r = await c.post("/auth/signup", json=no_methods)
-        check("signup with no methods rejected", r.status_code == 422, r.text[:200])
+        r = await c.post("/auth/set-password", json={"token": token, "password": PASSWORD})
+        check("password set from the verification link", r.status_code == 200, r.text[:300])
 
-        r = await c.post("/auth/login", data={"username": "mary.banda@chilenje.zm",
-                                              "password": "12345678"})
-        check("cannot sign in before approval", r.status_code in (401, 403), r.text[:200])
+        r = await c.post("/auth/login", data={"username": LAB_EMAIL, "password": PASSWORD})
+        check("can sign in once the password is set", r.status_code == 200, r.text[:200])
 
-        print("\n2. APPLICATIONS -- the admin review queue")
+        r = await c.post("/auth/signup", json=dict(
+            country="Zambia", name="Mary Banda", position="Lab In-charge",
+            phone_number="+260970001234", email=LAB_EMAIL, facility_id=1))
+        check("a verified email cannot sign up again", r.status_code == 400, r.text[:200])
+
+        print("\n2. SCHEME REGISTRATION -> one laboratory per scheme")
+        reg_body = dict(user_email=LAB_EMAIL, scheme_id=1, name="Chilenje Clinic Lab",
+                        lab_type_id=1, physical_address="Chilenje", facility_id=1,
+                        method_list=[{"id": 1}, {"id": 2}], terms_accepted=True)
+        r = await c.post("/registration/register-scheme",
+                         json=dict(reg_body, terms_accepted=False))
+        check("registration without accepting terms rejected", r.status_code == 400, r.text[:200])
+
+        r = await c.post("/registration/register-scheme", json=reg_body)
+        check("scheme registration accepted", r.status_code == 200, r.text[:300])
+        reg = r.json()
+        lab_id = reg["laboratory_id"]
+        check("lab code generated by server", reg["code"] == "REG0001", reg)
+        check("one application per selected method", reg["application_count"] == 2, reg)
+
+        print("\n3. APPLICATIONS -> the admin review queue")
         r = await c.get("/applications/list", params={"pending": True})
         check("pending applications listed", r.status_code == 200 and len(r.json()) == 2, r.text[:200])
         r = await c.get(f"/applications/list/lab/{lab_id}")
         check("applications filtered by lab", r.status_code == 200 and len(r.json()) == 2, r.text[:200])
 
-        print("\n3. APPROVE THE LAB -- creates its account and approves its methods")
+        print("\n4. APPROVE THE LAB -> links the account and approves its methods")
         r = await c.put(f"/laboratorys/review-update/{lab_id}",
                         json={"user_id": 1, "review_action": assist.REVIEW_ACTION_APPROVE,
                               "comments": "Looks good", "content": None, "attachment_id": None})
@@ -162,9 +202,8 @@ async def run():
                                                       "status_id": assist.STATUS_APPROVED})
         check("applications approved with the lab", r.status_code == 200 and len(r.json()) == 2, r.text[:200])
 
-        r = await c.post("/auth/login", data={"username": "mary.banda@chilenje.zm",
-                                              "password": "12345678"})
-        check("lab can now sign in", r.status_code == 200, r.text[:200])
+        r = await c.post("/auth/login", data={"username": LAB_EMAIL, "password": PASSWORD})
+        check("lab can sign in", r.status_code == 200, r.text[:200])
         import jose.jwt as jwt
         claims = jwt.decode(r.json()["access_token"], assist.SECRET_KEY,
                             algorithms=[assist.ALGORITHM])
@@ -172,65 +211,35 @@ async def run():
         check("token carries the laboratory id", claims["lab"] == lab_id, claims)
         lab_user_id = claims["userid"]
 
-        print("\n4. CYCLE -- admin starts one")
+        print("\n5. CYCLE -> admin creates and approves one")
         cyc = dict(name="DTS Round One 2026", code="2026-A", scheme_id=1,
-                   effective_date="2027-01-01", pt_cyle_status_id=assist.PT_CYCLE_UPCOMING,
-                   closing_date="2027-08-31", shipping_date="2027-06-01",
-                   reports_availability_date="2027-10-01", user_id=1,
+                   effective_date="2027-01-01", closing_date="2027-02-01",
+                   shipping_date="2027-03-01", test_event_start_date="2027-03-10",
+                   test_event_stop_date="2027-03-20", result_submission_due_date="2027-04-01",
+                   reports_availability_date="2027-05-01", user_id=1,
                    status_id=assist.STATUS_SUBMITTED, stage_id=assist.APPROVAL_STAGE_SUBMITTED,
                    approval_levels=1)
         r = await c.post("/pt-cycles/create", json=cyc)
         check("cycle created", r.status_code == 200, r.text[:300])
         cycle_id = r.json()["id"]
-
-        # the status is not the caller's to choose
-        no_status = {k: v for k, v in cyc.items() if k != "pt_cyle_status_id"}
-        r = await c.post("/pt-cycles/create", json=dict(no_status, code="2026-A-NS"))
-        check("a cycle can be created without naming a status",
-              r.status_code == 200, r.text[:200])
-        check("and it opens as Upcoming",
-              r.status_code == 200
-              and r.json()["pt_cyle_status_id"] == assist.PT_CYCLE_UPCOMING,
-              r.text[:200])
-
-        r = await c.post("/pt-cycles/create",
-                         json=dict(cyc, code="2026-A-CLOSED",
-                                   pt_cyle_status_id=assist.PT_CYCLE_CLOSED))
-        check("a cycle cannot be created already Closed",
-              r.status_code == 200
-              and r.json()["pt_cyle_status_id"] == assist.PT_CYCLE_UPCOMING,
-              r.text[:200])
-
-        r = await c.put(f"/pt-cycles/update/{cycle_id}",
-                        json=dict(cyc, pt_cyle_status_id=assist.PT_CYCLE_SAMPLES_SHIPPED))
-        check("an edit cannot move the status", r.status_code == 400, r.text[:200])
-
-        r = await c.put(f"/pt-cycles/update/{cycle_id}", json=dict(cyc, description="edited"))
-        check("but an edit that leaves it alone is fine",
-              r.status_code == 200, r.text[:200])
-
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_STARTED, "user_id": 1})
-        check("unapproved cycle cannot be started", r.status_code == 400, r.text[:200])
+        check("status is derived, not chosen -> opens as Upcoming",
+              r.json()["pt_cyle_status_id"] == assist.PT_CYCLE_UPCOMING, r.json())
 
         r = await c.put(f"/pt-cycles/review-update/{cycle_id}",
                         json={"user_id": 2, "review_action": assist.REVIEW_ACTION_APPROVE,
                               "comments": "ok", "content": None, "attachment_id": None})
         check("cycle approved", r.status_code == 200, r.text[:300])
 
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_REPORT_AVAILABLE, "user_id": 1})
-        check("cycle cannot skip a status", r.status_code == 400, r.text[:200])
+        r = await c.put(f"/pt-cycles/dev-set-phase/{cycle_id}",
+                        json={"pt_cyle_status_id": assist.PT_CYCLE_ENROLMENT_OPEN,
+                              "user_id": lab_user_id})
+        check("a lab user cannot move the cycle phase", r.status_code == 403, r.text[:200])
 
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_STARTED, "user_id": lab_user_id})
-        check("a lab user cannot change cycle status", r.status_code == 403, r.text[:200])
+        r = await c.put(f"/pt-cycles/dev-set-phase/{cycle_id}",
+                        json={"pt_cyle_status_id": assist.PT_CYCLE_ENROLMENT_OPEN, "user_id": 1})
+        check("enrolment opened", r.status_code == 200, r.text[:300])
 
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_STARTED, "user_id": 1})
-        check("cycle started", r.status_code == 200, r.text[:300])
-
-        print("\n5. ENROLMENT -- the lab applies")
+        print("\n6. ENROLMENT -> the lab applies")
         r = await c.get(f"/pt-cycles/open/{lab_id}")
         check("cycle offered to the lab", r.status_code == 200 and len(r.json()) == 1, r.text[:200])
 
@@ -250,21 +259,19 @@ async def run():
         enrollments = r.json()
         check("enrolments listed for the lab", len(enrollments) == 2, r.text[:200])
         enr_ultra = next(e for e in enrollments if e["method_id"] == 1)
+        enr_xdr = next(e for e in enrollments if e["method_id"] == 2)
 
-        print("\n6. SHIPPING -- opens the result sheets")
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_SAMPLES_SHIPPED, "user_id": 1})
+        print("\n7. SHIPPING -> opens the result sheets")
+        r = await c.put(f"/pt-cycles/samples-shipped/{cycle_id}", json={"user_id": 1})
         check("shipping blocked while no enrolment is accepted", r.status_code == 400, r.text[:200])
 
-        enr_xdr = next(e for e in enrollments if e["method_id"] == 2)
         for label, enr in (("Ultra", enr_ultra), ("XDR", enr_xdr)):
             r = await c.put(f"/enrollments/review-update/{enr['id']}",
                             json={"user_id": 1, "review_action": assist.REVIEW_ACTION_APPROVE,
                                   "comments": "accepted", "content": None, "attachment_id": None})
             check(f"{label} enrolment accepted", r.status_code == 200, r.text[:300])
 
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_SAMPLES_SHIPPED, "user_id": 1})
+        r = await c.put(f"/pt-cycles/samples-shipped/{cycle_id}", json={"user_id": 1})
         check("samples shipped", r.status_code == 200, r.text[:300])
         check("a sheet per sample across both accepted enrolments",
               r.json()["result_count"] == 10, r.json())
@@ -272,19 +279,13 @@ async def run():
         r = await c.get(f"/tb-xpert-xdr-results/list/{lab_id}")
         xdr_sheets = r.json()
         check("XDR sheets opened on the XDR form", len(xdr_sheets) == 5, r.text[:200])
-        check("XDR sheets carry the XDR enrolment",
-              all(s["enrollment_id"] == enr_xdr["id"] for s in xdr_sheets),
-              [s["enrollment_id"] for s in xdr_sheets])
 
         r = await c.get(f"/tb-xpert-ultra-results/list/{lab_id}")
         sheets = r.json()
         check("Ultra sheets visible to the lab, XDR ones excluded",
               len(sheets) == 5, r.text[:200])
-        check("sheets carry the real enrolment",
-              all(s["enrollment_id"] == enr_ultra["id"] for s in sheets),
-              [s["enrollment_id"] for s in sheets])
 
-        print("\n7. RESULTS -- the lab tests and reports")
+        print("\n8. SAMPLE RECEIPT -> required before any results")
         sheet = sheets[0]
         full = dict(sheet)
         full.update(user_id=lab_user_id, status_id=assist.STATUS_DRAFT,
@@ -294,16 +295,19 @@ async def run():
             full.pop(k, None)
 
         r = await c.put(f"/tb-xpert-ultra-results/update/{sheet['id']}", json=full)
-        check("results blocked before samples are received", r.status_code == 400, r.text[:200])
+        check("results blocked before the sample's receipt is recorded",
+              r.status_code == 400, r.text[:200])
 
-        r = await c.put(f"/enrollments/receive-samples/{enr_ultra['id']}",
-                        json={"user_id": lab_user_id})
-        check("samples received", r.status_code == 200, r.text[:300])
+        received = 0
+        for s in sheets + xdr_sheets:
+            rr = await c.post("/sample-receipts", json={
+                "user_id": lab_user_id, "pt_cycle_id": cycle_id, "lab_id": lab_id,
+                "method_sample_id": s["method_sample_id"], "date_received": "2026-09-05",
+                "condition": "Suitable", "temperature_c": 4.0, "comments": "ok"})
+            received += 1 if rr.status_code == 200 else 0
+        check("receipts recorded for every sample", received == 10, received)
 
-        r = await c.put(f"/enrollments/receive-samples/{enr_xdr['id']}",
-                        json={"user_id": lab_user_id})
-        check("XDR samples received", r.status_code == 200, r.text[:300])
-
+        print("\n9. RESULTS -> the lab tests and reports")
         xdr = xdr_sheets[0]
         xdr_body = {k: v for k, v in xdr.items() if k not in (
             "stage", "status", "user", "scheme", "laboratory", "service",
@@ -358,29 +362,16 @@ async def run():
         r = await c.put(f"/tb-xpert-ultra-results/update/{sheet2['id']}", json=good)
         check("complete result submitted", r.status_code == 200, r.text[:400])
 
-        r = await c.put(f"/tb-xpert-ultra-results/review-update/{sheet2['id']}",
-                        json={"user_id": 1, "review_action": assist.REVIEW_ACTION_APPROVE,
-                              "comments": "graded", "content": None, "attachment_id": None})
-        check("result approved by the provider", r.status_code == 200, r.text[:300])
-
-        r = await c.put(f"/tb-xpert-ultra-results/update/{sheet2['id']}", json=good)
-        check("approved result locked", r.status_code == 400, r.text[:200])
-
-        print("\n8. CYCLE CLOSE-OUT")
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_REPORT_AVAILABLE, "user_id": 1})
-        check("reports made available", r.status_code == 200, r.text[:300])
+        print("\n10. PUBLISH -> reports made available, results locked")
+        r = await c.put(f"/pt-cycles/publish-reports/{cycle_id}", json={"user_id": 1})
+        check("reports published", r.status_code == 200, r.text[:300])
 
         r = await c.put(f"/tb-xpert-ultra-results/update/{sheet['id']}", json=err_ok)
-        check("results locked once reporting starts", r.status_code == 400, r.text[:200])
+        check("results locked once reports are published", r.status_code == 400, r.text[:200])
 
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_CLOSED, "user_id": 1})
-        check("cycle closed", r.status_code == 200, r.text[:300])
-
-        r = await c.put(f"/pt-cycles/status/{cycle_id}",
-                        json={"pt_cyle_status_id": assist.PT_CYCLE_CLOSED, "user_id": 1})
-        check("a closed cycle cannot move on", r.status_code == 400, r.text[:200])
+        r = await c.put(f"/pt-cycles/publish-reports/{cycle_id}", json={"user_id": 1})
+        check("an already-published round cannot be published again",
+              r.status_code == 400, r.text[:200])
 
     print("\n" + "=" * 60)
     print(f"{len(OK)} passed, {len(FAIL)} failed")

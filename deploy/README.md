@@ -67,8 +67,21 @@ Tables are created automatically on first start (no migration step). Optionally 
 the demo dataset for the workshop:
 
 ```bash
-./venv/bin/python scripts/seed_demo.py
+./venv/bin/python scripts/seed_demo.py            # rebuild the full demo dataset
 ```
+
+`seed_demo.py` always targets the local dev database (never production). Re-running it
+is safe and idempotent: it truncates the transactional tables (labs, enrolments, PT
+cycles, all result tables, applications, announcements) and rebuilds the catalogue,
+provider staff and the whole workflow. Two modes:
+
+```bash
+./venv/bin/python scripts/seed_demo.py            # reset → full demo dataset
+./venv/bin/python scripts/seed_demo.py --clear    # wipe demo data only, no reseeding
+```
+
+`--clear` (alias `--clear-only`) leaves an empty transactional layer on top of the
+catalogue and provider staff — a clean slate for manual end-to-end testing.
 
 Create the Linux user and install the service:
 

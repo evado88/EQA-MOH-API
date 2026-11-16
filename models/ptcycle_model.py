@@ -113,9 +113,9 @@ class PTCycle(BaseModel):
         ...,
         description="Effective Date must be provided",
     )
-    # Not asked for when a cycle is created - a new cycle is always Upcoming -
-    # and not changed by an edit either. It moves one step at a time through
-    # /pt-cycles/status/{id}, which is where the side effects of each step live.
+    # Not chosen by the caller: the lifecycle status is derived from the
+    # schedule dates and the two manual gates (samples shipped / reports
+    # published). A new cycle is always Upcoming; an edit never moves it.
     pt_cyle_status_id: Optional[int] = Field(
         default=None,
         description="Set by the server. A new PT Cycle always starts as Upcoming",

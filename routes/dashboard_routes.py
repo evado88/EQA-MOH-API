@@ -396,11 +396,13 @@ async def get_dashboard_summary(
         JOIN schemes s ON s.id = c.scheme_id
         JOIN pt_cycle_statuses cs ON cs.id = c.pt_cyle_status_id
         LEFT JOIN enrollments e ON e.pt_cycle_id = c.id {and_lab}
-        WHERE c.pt_cyle_status_id < :closed
+        WHERE c.pt_cyle_status_id < :reported
         GROUP BY 1, 2, 3, 4, 5, 6, 7
         ORDER BY c.reports_availability_date
         """,
-        {**params, "closed": assist.PT_CYCLE_CLOSED},
+        # rounds still to be scored = anything before the reports are published
+        # (Report Available is the terminal phase in the derived-status model)
+        {**params, "reported": assist.PT_CYCLE_REPORT_AVAILABLE},
     )
     for row in open_cycles:
         row["ptCycleId"] = row.pop("pt_cycle_id")
