@@ -812,7 +812,7 @@ async def list_ptcycle_documents(id: int, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-async def run_pt_cycle_reminders(db: AsyncSession, dry_run: bool = False):
+async def run_pt_cycle_reminders(db: AsyncSession, dry_run: bool = False, as_of=None):
     """Send any date reminders that fall due today, and refresh cached statuses.
 
     Idempotent: each (cycle, date, lead) reminder is recorded once in
@@ -823,8 +823,13 @@ async def run_pt_cycle_reminders(db: AsyncSession, dry_run: bool = False):
     be sent (and to whom - recipient emails are added to each detail line) but
     sends no email, records nothing, and rolls back, so a later real run still
     sends everything. Use it to see what a run would do before firing it.
+
+    as_of (a date) evaluates the run as if that were today, to preview a future
+    day's reminders - e.g. what tomorrow's 07:00 job will send. It is honoured
+    ONLY together with dry_run; a real run always uses the real clock, so it can
+    never record a future date's reminders and silently suppress the real send.
     """
-    today = assist.get_current_date().date()
+    today = as_of if (dry_run and as_of) else assist.get_current_date().date()
     details = []
     sent = 0
 

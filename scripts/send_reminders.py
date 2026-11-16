@@ -11,13 +11,19 @@ pt_cycle_reminders and never resends it, and it also refreshes each cycle's
 cached lifecycle status while it is there. Running twice in a day is safe.
 
 Usage (from the project root, with the root on PYTHONPATH):
-    python scripts/send_reminders.py              # send the reminders
-    python scripts/send_reminders.py --dry-run    # preview only, send nothing
+    python scripts/send_reminders.py                       # send the reminders
+    python scripts/send_reminders.py --dry-run             # preview today, send nothing
+    python scripts/send_reminders.py --date 2026-11-17     # preview a future day (implies --dry-run)
 
 --dry-run shows exactly what a real run would send, and to which labs, without
 sending any email or recording anything - so running it does not stop the next
 real run from sending those same reminders. Use it to check a run before firing
 the one-shot service.
+
+--date YYYY-MM-DD evaluates the run as if that were today, to preview what a
+future day's 07:00 job will send (a 0 for today does not mean tomorrow is also
+empty - reminders are date-driven). It always implies --dry-run and never
+sends or records anything.
 
 It uses DATABASE_URL and the mail settings from the environment (.env) - the
 same configuration as the running API, so it talks to the real database and
@@ -45,14 +51,15 @@ import main  # noqa: E402,F401
 from routes.ptcycle_routes import run_pt_cycle_reminders  # noqa: E402
 
 
-async def main_(dry_run=False):
+async def main_(dry_run=False, as_of=None):
     async with AsyncSessionLocal() as db:
-        result = await run_pt_cycle_reminders(db, dry_run=dry_run)
+        result = await run_pt_cycle_reminders(db, dry_run=dry_run, as_of=as_of)
 
+    when = f" as of {as_of:%d %b %Y}" if as_of else ""
     prefix = "[DRY RUN] would send" if dry_run else "sent"
     print(
-        f"pt-cycle reminders: {prefix} {result.reminders_sent} reminder(s) across "
-        f"{result.cycles_checked} approved cycle(s)"
+        f"pt-cycle reminders{when}: {prefix} {result.reminders_sent} reminder(s) "
+        f"across {result.cycles_checked} approved cycle(s)"
     )
     for line in result.details:
         print("  -", line)
@@ -61,6 +68,28 @@ async def main_(dry_run=False):
     return 0 if result.succeeded else 1
 
 
+def _parse_args(argv):
+    """--dry-run / -n for a preview; --date YYYY-MM-DD to preview a future day
+    (implies dry-run)."""
+    from datetime import date
+
+    dry = any(a in ("--dry-run", "--dry", "-n") for a in argv)
+    as_of = None
+    for i, a in enumerate(argv):
+        value = None
+        if a.startswith("--date="):
+            value = a.split("=", 1)[1]
+        elif a == "--date" and i + 1 < len(argv):
+            value = argv[i + 1]
+        if value:
+            try:
+                as_of = date.fromisoformat(value)
+            except ValueError:
+                sys.exit(f"invalid --date {value!r}; expected YYYY-MM-DD")
+            dry = True  # previewing another day never sends
+    return dry, as_of
+
+
 if __name__ == "__main__":
-    _dry = any(a in ("--dry-run", "--dry", "-n") for a in sys.argv[1:])
-    sys.exit(asyncio.run(main_(dry_run=_dry)))
+    _dry, _as_of = _parse_args(sys.argv[1:])
+    sys.exit(asyncio.run(main_(dry_run=_dry, as_of=_as_of)))

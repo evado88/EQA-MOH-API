@@ -190,6 +190,28 @@ It also refreshes each cycle's cached lifecycle status. The timer fires at 07:00
 time; see the timer file to pin it to `Africa/Lusaka`. The same script can be run by hand:
 `./venv/bin/python scripts/send_reminders.py`.
 
+### Previewing what a run will send
+
+Reminders are date-driven, so an empty result today says nothing about future days.
+Preview before sending (always from the project root so `.env` is read):
+
+```bash
+# what a real run RIGHT NOW would send (sends nothing, records nothing):
+./venv/bin/python scripts/send_reminders.py --dry-run
+
+# what a FUTURE day's 07:00 job will send (implies --dry-run; never sends):
+./venv/bin/python scripts/send_reminders.py --date 2026-11-17
+
+# the next N days at a glance (bash):
+for d in $(seq 0 6); do \
+  ./venv/bin/python scripts/send_reminders.py --date "$(date -d "+$d day" +%F)"; \
+done
+```
+
+Each line shows the cycle, the triggering date field and lead (e.g. `result_submission_due_date (-3d)`),
+the lab count, and — in a preview — the recipient emails. `--date` only ever previews: it
+cannot record a future date's reminders, so it can't suppress the real send.
+
 ## Going to production (after the workshop)
 
 - Set `ENABLE_DEV_TOOLS=0` (backend) and rebuild the frontend with
