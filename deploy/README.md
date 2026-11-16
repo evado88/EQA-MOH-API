@@ -152,10 +152,43 @@ sudo systemctl restart eqa-api
   `systemctl status eqa-api`, then
   `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8553/docs` (expect 200).
 - **`asyncpg ... InterfaceError: connection is closed`** on the first query (e.g. login) —
-  a pooled connection broke across a gunicorn fork. Set **`DB_POOL=null`** in `.env` and
-  restart. If you also run **more than one worker**, set `RUN_SCHEDULER=0` on all but one
-  process so reminder emails don't fire per worker. (Plain `uvicorn --workers 1`, as in
-  `eqa-api.service`, avoids both issues.)
+  a pooled connection went stale (idle-reaped by the VPS/Postgres) or broke across a fork.
+  The engine now enables `pool_pre_ping` by default, which fixes it; just deploy the
+  updated `database.py` and restart. Behind a forking server or a transaction-mode
+  PgBouncer you can also set **`DB_POOL=null`** in `.env`. (Plain `uvicorn --workers 1`,
+  as in `eqa-api.service`, avoids the issue entirely.)
+- **Duplicate reminder emails** — with several workers the in-app scheduler runs once per
+  worker. Set **`RUN_SCHEDULER=0`** on the API service and send reminders from one place
+  with the timer below.
+
+## Daily reminders with multiple workers
+
+The daily PT-cycle reminder job normally runs inside the API process. With more than one
+worker that means one copy per worker, so disable it on the API service and run it once a
+day from a systemd timer instead:
+
+```bash
+# 1. on the API service (gunicorn / multi-worker), stop the in-app scheduler:
+#    add RUN_SCHEDULER=0 to .env, then: sudo systemctl restart eqa-api   (or eqaapi)
+
+# 2. install the one-shot service + daily timer:
+sudo cp deploy/eqa-reminders.service /etc/systemd/system/eqa-reminders.service
+sudo cp deploy/eqa-reminders.timer   /etc/systemd/system/eqa-reminders.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now eqa-reminders.timer
+
+# 3. verify:
+systemctl list-timers eqa-reminders.timer     # next scheduled run
+sudo systemctl start eqa-reminders.service     # run once now
+journalctl -u eqa-reminders.service -n 50      # check it sent cleanly
+```
+
+Adjust `User`/paths in the unit files to match your install (reference uses
+`/opt/eqa/EQA-MOH-API` + the `eqa` user). The job is idempotent — each reminder is
+recorded in `pt_cycle_reminders` and never resent — so running it twice in a day is safe.
+It also refreshes each cycle's cached lifecycle status. The timer fires at 07:00 server
+time; see the timer file to pin it to `Africa/Lusaka`. The same script can be run by hand:
+`./venv/bin/python scripts/send_reminders.py`.
 
 ## Going to production (after the workshop)
 

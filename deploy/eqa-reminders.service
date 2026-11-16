@@ -1,0 +1,35 @@
+# One-shot systemd service that sends the day's PT-cycle reminders once.
+#
+# Pair it with eqa-reminders.timer (daily). Use this whenever the API runs with
+# more than one worker (gunicorn / multiple uvicorn workers): set
+# RUN_SCHEDULER=0 on the API service so no worker runs the in-app scheduler, and
+# let this one process send the reminders instead - exactly once a day.
+#
+# Install:
+#   sudo cp deploy/eqa-reminders.service /etc/systemd/system/eqa-reminders.service
+#   sudo cp deploy/eqa-reminders.timer   /etc/systemd/system/eqa-reminders.timer
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now eqa-reminders.timer
+#   systemctl list-timers eqa-reminders.timer     # see the next run
+#   sudo systemctl start eqa-reminders.service     # run it once now to test
+#   journalctl -u eqa-reminders.service -n 50      # check the output
+#
+# Adjust User/Group/paths to match where the repo and venv actually live. This
+# install has them under /root/EQA-MOH-API running as root; the runbook's
+# reference install uses /opt/eqa/EQA-MOH-API and the eqa user - match whichever
+# you deployed.
+
+[Unit]
+Description=EQA PT-cycle daily reminders (one-shot)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=eqa
+Group=eqa
+WorkingDirectory=/opt/eqa/EQA-MOH-API
+# the script imports top-level modules (database, routes, ...), so the project
+# root must be importable; .env is read from WorkingDirectory
+Environment=PYTHONPATH=/opt/eqa/EQA-MOH-API
+ExecStart=/opt/eqa/EQA-MOH-API/venv/bin/python scripts/send_reminders.py

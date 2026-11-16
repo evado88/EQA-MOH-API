@@ -1,0 +1,19 @@
+# Fires eqa-reminders.service once a day at 07:00.
+#
+# OnCalendar uses the server's local time. If the server runs in UTC but you
+# want 07:00 Lusaka time, either set the server timezone
+# (sudo timedatectl set-timezone Africa/Lusaka) or pin it here - systemd on
+# Ubuntu 24 accepts a timezone suffix:  OnCalendar=*-*-* 07:00:00 Africa/Lusaka
+#
+# Persistent=true runs a missed reminder once after downtime (e.g. the box was
+# off at 07:00); the job is idempotent so a catch-up run sends nothing twice.
+
+[Unit]
+Description=Run EQA PT-cycle reminders daily at 07:00
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
