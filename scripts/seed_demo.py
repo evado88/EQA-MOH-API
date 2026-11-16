@@ -809,6 +809,28 @@ async def receive_all(c, cycle_id, users, labs, when):
         done += 1
     note(f"{done} sample receipt(s) recorded")
 
+    # the worksheet file is now mandatory before a result can be submitted, so
+    # attach one per enrolment (the panel) that shipping opened sheets for
+    enroll_ids: set = set()
+    async with database.AsyncSessionLocal() as db:
+        for table in _RESULT_TABLES:
+            rows = (await db.execute(text(
+                f"SELECT DISTINCT enrollment_id, lab_id FROM {table} "
+                "WHERE pt_cycle_id=:c"), {"c": cycle_id})).all()
+            enroll_ids |= {
+                enr for enr, lab_id in rows
+                if enr is not None and lab_id in user_by_lab
+            }
+
+    attached = 0
+    for enr in enroll_ids:
+        fr = await c.post(
+            f"/attachments/create/type/result-files/parent/{enr}",
+            files={"file": ("worksheet.xlsx", b"seed worksheet", "application/octet-stream")},
+        )
+        attached += 1 if fr.status_code == 200 else 0
+    note(f"{attached} worksheet file(s) attached")
+
 
 # a spread of results that exercises every branch of the form
 RESULT_PATTERNS = [
@@ -1292,7 +1314,7 @@ async def capture_bacteriology_results(c, cycle_id, users, labs, received_on,
                 receipt_temperature=round(5.0 + spread(lab_id, i, 0.5), 1),
                 sample_condition="Unsuitable" if not_done else "Suitable",
                 sample_condition_reason=reason,
-                date_submitted=tested_on.isoformat(),
+                date_tested=tested_on.isoformat(),
                 testing_not_done=not_done,
                 testing_not_done_reason=reason,
                 gram_stain_reaction=None if not_done else stain,

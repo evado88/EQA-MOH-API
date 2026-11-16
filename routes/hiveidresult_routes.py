@@ -4,6 +4,7 @@ from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
 from helpers.receipts import receipt_exists
+from helpers.attachments import result_file_exists
 from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.hiveidresult_model import (
@@ -293,6 +294,18 @@ async def update_hiveidresult(
             detail=(
                 "Please record this sample's receipt details (date received, "
                 "condition and temperature) before entering results for it"
+            ),
+        )
+
+    # the worksheet file is mandatory before the result can be submitted
+    if hiveidresult_update.status_id == assist.STATUS_SUBMITTED and not await result_file_exists(
+        db, hiveidresult.enrollment_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please attach the worksheet file for this panel before "
+                "submitting the result"
             ),
         )
 

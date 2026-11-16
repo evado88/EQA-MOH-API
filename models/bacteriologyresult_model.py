@@ -275,7 +275,6 @@ RECEIPT_FIELDS = [
     "receipt_temperature",
     "sample_condition",
     "sample_condition_reason",
-    "date_submitted",
 ]
 
 RECEIPT_LABELS = {
@@ -283,7 +282,6 @@ RECEIPT_LABELS = {
     "receipt_temperature": "Receipt Temperature",
     "sample_condition": "Sample Condition",
     "sample_condition_reason": "Reason the Sample was Unsuitable",
-    "date_submitted": "Date of Submission",
 }
 
 # Sample receipt details (date received, condition, temperature) are now
@@ -404,7 +402,7 @@ class BacteriologyResultDB(Base):
     receipt_temperature = Column(Float, nullable=True)
     sample_condition = Column(String, nullable=True)
     sample_condition_reason = Column(String, nullable=True)
-    date_submitted = Column(Date, nullable=True)
+    date_tested = Column(Date, nullable=True)
 
     # 'Testing not done on this specimen/isolate'
     testing_not_done = Column(Boolean, nullable=False, default=False)
@@ -699,8 +697,8 @@ class BacteriologyResult(BaseModel):
     sample_condition_reason: Optional[str] = Field(
         default=None, description="Why the sample was unsuitable"
     )
-    date_submitted: Optional[date] = Field(
-        default=None, description="The date the worksheet was submitted"
+    date_tested: Optional[date] = Field(
+        default=None, description="The date the sample was tested"
     )
 
     # 'Testing not done on this specimen/isolate'
@@ -952,6 +950,11 @@ class BacteriologyResult(BaseModel):
                     "specimen or isolate"
                 )
             return values
+
+        if not values.get("date_tested"):
+            raise ValueError(
+                "Please provide the Date Tested before submitting the worksheet"
+            )
 
         if not values.get("gram_stain_reaction"):
             raise ValueError(

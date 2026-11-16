@@ -4,6 +4,7 @@ from sqlalchemy.future import select
 from typing import List, Optional
 from database import get_db
 from helpers.receipts import receipt_exists
+from helpers.attachments import result_file_exists
 from helpers.submissions import log_result_submission
 from helpers.auth import get_current_user, CurrentUser
 from models.bacteriologyresult_model import (
@@ -105,7 +106,7 @@ async def post_bacteriologyresult(bacteriologyresult: BacteriologyResult, db: As
         receipt_temperature=bacteriologyresult.receipt_temperature,
         sample_condition=bacteriologyresult.sample_condition,
         sample_condition_reason=bacteriologyresult.sample_condition_reason,
-        date_submitted=bacteriologyresult.date_submitted,
+        date_tested=bacteriologyresult.date_tested,
         testing_not_done=bacteriologyresult.testing_not_done,
         testing_not_done_reason=bacteriologyresult.testing_not_done_reason,
         gram_stain_reaction=bacteriologyresult.gram_stain_reaction,
@@ -290,6 +291,7 @@ async def list_lab_bacteriologyresults(lab_id: int , db: AsyncSession = Depends(
 EDITABLE_RESULT_FIELDS = [
     "description",
     *RECEIPT_FIELDS,
+    "date_tested",
     "testing_not_done",
     "testing_not_done_reason",
     "gram_stain_reaction",
@@ -382,6 +384,18 @@ async def update_bacteriologyresult(
             detail=(
                 "Please record this sample's receipt details (date received, "
                 "condition and temperature) before entering results for it"
+            ),
+        )
+
+    # the worksheet file is mandatory before the result can be submitted
+    if bacteriologyresult_update.status_id == assist.STATUS_SUBMITTED and not await result_file_exists(
+        db, bacteriologyresult.enrollment_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please attach the worksheet file for this panel before "
+                "submitting the result"
             ),
         )
 

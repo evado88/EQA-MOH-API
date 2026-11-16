@@ -326,6 +326,20 @@ async def run():
                         spc_ahpc=22.1, inha=22.3, katg=24.0, fabg1=23.0,
                         gyra1=23.2, gyra2=21.0, gyra3=22.0, gyrb2=22.0, rrs=21.0)
         r = await c.put(f"/tb-xpert-xdr-results/update/{xdr['id']}", json=xdr_body)
+        check("submission blocked before the worksheet file is attached",
+              r.status_code == 400, r.text[:200])
+
+        # the worksheet file is mandatory before a complete result can be submitted
+        enroll_ids = {s["enrollment_id"] for s in sheets + xdr_sheets}
+        attached = 0
+        for enr in enroll_ids:
+            fr = await c.post(
+                f"/attachments/create/type/result-files/parent/{enr}",
+                files={"file": ("worksheet.xlsx", b"worksheet", "application/octet-stream")})
+            attached += 1 if fr.status_code == 200 else 0
+        check("worksheet file attached to each panel", attached == len(enroll_ids), attached)
+
+        r = await c.put(f"/tb-xpert-xdr-results/update/{xdr['id']}", json=xdr_body)
         check("XDR result submitted", r.status_code == 200, r.text[:400])
 
         bad_xdr = dict(xdr_body, tb_detection_result="TRACE")
