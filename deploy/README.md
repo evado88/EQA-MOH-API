@@ -53,6 +53,7 @@ Edit `.env` (loaded automatically from the working directory):
 ```
 DATABASE_URL=postgresql+asyncpg://eqa:CHANGE-ME@localhost:5432/moheqa
 DB_ECHO=false
+DB_POOL=null                 # set when running under gunicorn (multi-worker / --preload)
 SECRET_KEY=<python -c "import secrets; print(secrets.token_urlsafe(48))">
 CORS_ORIGINS=https://eqa.ims-zm.online
 MAIL_USERNAME=...            # rotated Gmail account
@@ -142,6 +143,19 @@ cd /opt/eqa/EQA-MOH-API && git pull && ./venv/bin/pip install -r requirements.tx
 sudo systemctl restart eqa-api
 # frontend: rebuild and rsync dist/ again
 ```
+
+## Troubleshooting
+
+- **502 on `/api/...`** — nginx is up but can't reach uvicorn. Check the service is
+  running and listening on the expected port (this VPS: **8553**, as 8800 is taken by
+  another app), and that nginx proxies the same port:
+  `systemctl status eqa-api`, then
+  `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8553/docs` (expect 200).
+- **`asyncpg ... InterfaceError: connection is closed`** on the first query (e.g. login) —
+  a pooled connection broke across a gunicorn fork. Set **`DB_POOL=null`** in `.env` and
+  restart. If you also run **more than one worker**, set `RUN_SCHEDULER=0` on all but one
+  process so reminder emails don't fire per worker. (Plain `uvicorn --workers 1`, as in
+  `eqa-api.service`, avoids both issues.)
 
 ## Going to production (after the workshop)
 

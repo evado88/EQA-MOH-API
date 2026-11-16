@@ -18,12 +18,12 @@ eqa.ims-zm.online {
         request_body {
             max_size 25MB      # result-file attachments
         }
-        reverse_proxy 127.0.0.1:8800
+        reverse_proxy 127.0.0.1:8553
     }
 
     # uploaded files served by the backend (keep the /static path)
     handle /static/* {
-        reverse_proxy 127.0.0.1:8800
+        reverse_proxy 127.0.0.1:8553
     }
 
     # cache content-hashed build assets hard

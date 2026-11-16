@@ -25,7 +25,8 @@ User=eqa
 Group=eqa
 WorkingDirectory=/opt/eqa/EQA-MOH-API
 # .env in WorkingDirectory is loaded automatically by helpers/env.py
-ExecStart=/opt/eqa/EQA-MOH-API/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8800 --workers 1
+# port 8553 on this VPS (8800, the local-dev default, is used by another app)
+ExecStart=/opt/eqa/EQA-MOH-API/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8553 --workers 1
 Restart=always
 RestartSec=3
 
