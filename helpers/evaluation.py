@@ -7,6 +7,7 @@ time - see models/evaluation_model.py for why.
 import statistics
 from collections import Counter, defaultdict
 
+from sqlalchemy import or_
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
@@ -115,14 +116,22 @@ def _not_reported_reason(form, row):
 def _grade_ast(reported, assigned, policy):
     """Grades the AST section against the discs the participant actually tested.
 
-    Protocol TP-NHRTI-BACT-001 scores 'Tested AST discs', so a participant is
-    judged on the agents it reported that the assigned value has an answer for,
-    not on agents it was never asked about and not on agents it chose to add.
-    All of them have to agree: the scheme's bar is 100%.
+    Protocol TP-NHRTI-BACT-001, as scored by the NHRTI analysis tool, judges a
+    participant on the agents it reported that the target gives a definite
+    interpretation for ('evaluated discs') - not on agents it was never asked
+    about, not on agents it chose to add, and not on agents the target left as
+    'not evaluated'. The section is worth 20 marks, split across the evaluated
+    discs: a participant scores the marks for the discs it got right, so
+
+        score = round( agreed / evaluated * 20 )
+
+    Full agreement is Acceptable, some agreement is a Warning, none is
+    Unacceptable, and nothing to grade against is Not Evaluated.
     """
     mine = ast_interpretations(reported)
     theirs = ast_interpretations(assigned)
 
+    # the evaluated discs: reported by the participant and definite in the target
     shared = [agent for agent in mine if agent in theirs]
 
     if not shared:
@@ -130,15 +139,15 @@ def _grade_ast(reported, assigned, policy):
 
     agreed = [agent for agent in shared if mine[agent] == theirs[agent]]
 
+    full = policy.max_for("ast_result")
+    score = round(len(agreed) / len(shared) * full, 1)
+
     if len(agreed) == len(shared):
-        return assist.GRADE_ACCEPTABLE, policy.max_for("ast_result"), None
+        return assist.GRADE_ACCEPTABLE, score, None
 
     disagreed = sorted(set(shared) - set(agreed))
-    return (
-        assist.GRADE_UNACCEPTABLE,
-        policy.unacceptable,
-        "Disagreed on " + ", ".join(disagreed),
-    )
+    grade = assist.GRADE_WARNING if agreed else assist.GRADE_UNACCEPTABLE
+    return grade, score, "Disagreed on " + ", ".join(disagreed)
 
 
 def _robust_statistics(values):
@@ -204,15 +213,26 @@ async def evaluate_cycle(db, ptcycle, user):
     )
     samples = {s.id: s for s in result.scalars().all()}
 
-    # the stated correct answer, per sample and per graded field
+    # the stated correct answer ('target'), per sample and per graded field.
+    # A target may be set for this round, or left as a round-less default; the
+    # round's own target wins where both exist.
     result = await db.execute(
         select(MethodSampleExpectedValueDB).where(
-            MethodSampleExpectedValueDB.method_sample_id.in_(sample_ids)
+            MethodSampleExpectedValueDB.method_sample_id.in_(sample_ids),
+            or_(
+                MethodSampleExpectedValueDB.pt_cycle_id == ptcycle.id,
+                MethodSampleExpectedValueDB.pt_cycle_id.is_(None),
+            ),
         )
     )
-    expected = {
-        (e.method_sample_id, e.attribute): e for e in result.scalars().all()
-    }
+    target_rows = result.scalars().all()
+    expected = {}
+    for e in target_rows:
+        if e.pt_cycle_id is None:
+            expected.setdefault((e.method_sample_id, e.attribute), e)
+    for e in target_rows:
+        if e.pt_cycle_id == ptcycle.id:
+            expected[(e.method_sample_id, e.attribute)] = e
 
     # lab codes, for the report number
     lab_ids = {row.lab_id for _, row in rows}
@@ -433,6 +453,17 @@ async def evaluate_cycle(db, ptcycle, user):
                     )
                 elif disagreement:
                     ev.not_evaluated_reason = disagreement
+
+            elif attribute == assist.ORGANISM_ATTRIBUTE:
+                # bacterial identification is scored with partial credit for a
+                # right genus, not simply right or wrong
+                ev.max_score = policy.max_for(attribute)
+                value = getattr(row, attribute)
+                ev.reported_text = value
+                ev.grade, ev.score = assist.grade_organism(
+                    value, stat.assigned_value_text, policy, attribute
+                )
+                ev.evaluated = True
 
             else:
                 ev.max_score = policy.max_for(attribute)

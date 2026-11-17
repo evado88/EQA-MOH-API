@@ -10,7 +10,7 @@ consumer is XtraReports through the reporting views, not the API.
 """
 from sqlalchemy import (
     Boolean, Column, Float, Integer, String, Date, DateTime, ForeignKey,
-    UniqueConstraint,
+    Index, UniqueConstraint,
 )
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -123,7 +123,8 @@ class PTResultEvaluationDB(Base):
     # the outcome
     deviation = Column(Float, nullable=True)
     z_score = Column(Float, nullable=True)
-    score = Column(Integer, nullable=False, default=0)
+    # a float: the AST section awards a fraction of its 20 marks per disc graded
+    score = Column(Float, nullable=False, default=0)
     max_score = Column(Integer, nullable=False, default=0)
     grade = Column(String, nullable=False)
 
@@ -170,7 +171,9 @@ class PTEnrollmentPerformanceDB(Base):
     unacceptable_count = Column(Integer, nullable=False, default=0)
     not_reported_count = Column(Integer, nullable=False, default=0)
 
-    total_score = Column(Integer, nullable=False, default=0)
+    # a float: the AST section awards a fraction of its 20 marks, so a round
+    # total need not be whole
+    total_score = Column(Float, nullable=False, default=0)
     max_score = Column(Integer, nullable=False, default=0)
     percent_score = Column(Float, nullable=True)
 
@@ -252,7 +255,7 @@ class PTResultEvaluation(BaseModel):
 
     deviation: Optional[float] = None
     z_score: Optional[float] = None
-    score: int = 0
+    score: float = 0
     max_score: int = 0
     grade: str
 
@@ -285,7 +288,7 @@ class PTEnrollmentPerformance(BaseModel):
     unacceptable_count: int = 0
     not_reported_count: int = 0
 
-    total_score: int = 0
+    total_score: float = 0
     max_score: int = 0
     percent_score: Optional[float] = None
 
@@ -323,23 +326,45 @@ class EvaluateCycleResult(BaseModel):
 
 
 class MethodSampleExpectedValueDB(Base):
-    """The stated correct answer for one field of one manufactured sample.
+    """The stated correct answer ('target') for one field of one sample.
 
     A sample is graded on more than one field - an Ultra sample on both TB
     Detection and Rif - so the value belongs here rather than on the sample.
+
+    A target is a property of the ROUND, not of the catalogue sample: the same
+    'Sample E' is shipped cycle after cycle but carries a different organism each
+    time. So a row may be tied to a pt_cycle (this round's target) or left
+    cycle-less (a per-sample default, for material that never changes). The
+    evaluation prefers the round's target and falls back to the default - see
+    helpers/evaluation.py.
     """
 
     __tablename__ = "method_sample_expected_values"
     __table_args__ = (
-        UniqueConstraint(
+        # one target per sample+attribute within a round
+        Index(
+            "uq_mse_values_cycle_sample_attribute",
+            "pt_cycle_id", "method_sample_id", "attribute",
+            unique=True,
+            postgresql_where=Column("pt_cycle_id").isnot(None),
+        ),
+        # one round-less default per sample+attribute (a plain UNIQUE would let
+        # many NULL-cycle rows collide, since NULLs are distinct)
+        Index(
+            "uq_mse_values_default_sample_attribute",
             "method_sample_id", "attribute",
-            name="uq_method_sample_expected_values_sample_attribute",
+            unique=True,
+            postgresql_where=Column("pt_cycle_id").is_(None),
         ),
     )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     method_sample_id = Column(
         Integer, ForeignKey("method_samples.id", ondelete="CASCADE"), nullable=False
+    )
+    # the round this target belongs to; NULL is the per-sample default
+    pt_cycle_id = Column(
+        Integer, ForeignKey("pt_cycles.id", ondelete="CASCADE"), nullable=True
     )
     attribute = Column(String, nullable=False)
     expected_value_numeric = Column(Float, nullable=True)
@@ -354,6 +379,7 @@ class MethodSampleExpectedValueDB(Base):
 class MethodSampleExpectedValue(BaseModel):
     id: Optional[int] = None
     method_sample_id: int
+    pt_cycle_id: Optional[int] = None
     attribute: str
     expected_value_numeric: Optional[float] = None
     expected_value_text: Optional[str] = None

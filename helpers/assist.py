@@ -338,6 +338,71 @@ def grade_for_agreement(reported, assigned, policy=None, attribute=None):
     return GRADE_UNACCEPTABLE, policy.unacceptable
 
 
+# the organism identification field, which alone of the qualitative fields is
+# scored with partial credit
+ORGANISM_ATTRIBUTE = "organism_identified"
+
+# a genus given with one of these in place of a species is still a genus-level
+# answer, which the scheme accepts at full credit when the genus is right
+_GENUS_QUALIFIERS = {"species", "spp", "spp.", "sp", "sp."}
+
+
+def _genus_of(name):
+    return name.split(" ", 1)[0] if name else ""
+
+
+def _species_of(name):
+    parts = name.split(" ", 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def grade_organism(reported, assigned, policy=None, attribute=ORGANISM_ATTRIBUTE):
+    """Grades a bacterial identification with the scheme's partial credit.
+
+    Protocol TP-NHRTI-BACT-001, as encoded in the NHRTI analysis tool, awards:
+
+      * full marks for the right organism - the same name, the right genus given
+        at genus level ('Enterococcus species'/'spp'), or the right species
+        however the genus is written ('C. freundii' for 'Citrobacter freundii')
+      * half marks for the right genus only ('Enterococcus faecium' for
+        'Enterococcus faecalis')
+      * nothing otherwise
+
+    The analysis tool's own formula gives full marks to any answer ending in
+    'species'/'spp' regardless of genus - so 'Lactobacillus species' scored full
+    against an Enterococcus target. That is plainly a slip, so full credit for a
+    genus-level answer here also requires the genus to match.
+    """
+    policy = policy or DEFAULT_SCORING_POLICY
+    full = policy.max_for(attribute)
+
+    if reported is None or assigned is None:
+        return GRADE_NOT_EVALUATED, policy.unacceptable
+
+    reported = " ".join(str(reported).split())
+    assigned = " ".join(str(assigned).split())
+    if not reported or not assigned:
+        return GRADE_NOT_EVALUATED, policy.unacceptable
+
+    r, a = reported.lower(), assigned.lower()
+    r_genus, a_genus = _genus_of(r), _genus_of(a)
+    r_species, a_species = _species_of(r), _species_of(a)
+
+    full_credit = (
+        r == a
+        or (r_species in _GENUS_QUALIFIERS and r_genus == a_genus)
+        or (r_genus[:1] == a_genus[:1] and r_species and r_species == a_species)
+    )
+    if full_credit:
+        return GRADE_ACCEPTABLE, full
+
+    if r_genus and r_genus == a_genus:
+        # genus right, species wrong or missing - half marks
+        return GRADE_WARNING, full // 2
+
+    return GRADE_UNACCEPTABLE, policy.unacceptable
+
+
 def is_laboratory_role(role_id: int) -> bool:
     """Returns true when the specified role belongs to a participating laboratory"""
     return role_id in LABORATORY_ROLES
