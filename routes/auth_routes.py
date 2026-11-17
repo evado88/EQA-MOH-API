@@ -137,6 +137,28 @@ async def signup(signup: ParamUserSignup, db: AsyncSession = Depends(get_db)):
         facility_name = facility.name
         province_id = facility.province_id
         district_id = facility.district_id
+
+        # a facility self-registers once; after that its super user opens
+        # accounts for the rest of its staff (see /users/create-facility), so a
+        # second person cannot self-register under an already-registered facility
+        existing_super = (
+            await db.execute(
+                select(UserDB).where(
+                    UserDB.facility_id == facility.id,
+                    UserDB.role_id == assist.ROLE_FACILITY_SUPER_USER,
+                    UserDB.email_verified.is_(True),
+                    UserDB.email != email,
+                )
+            )
+        ).scalars().first()
+        if existing_super:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This facility is already registered. Please ask your facility's "
+                    "super user to create an account for you."
+                ),
+            )
     elif is_zambia and not facility_name:
         raise HTTPException(
             status_code=400,

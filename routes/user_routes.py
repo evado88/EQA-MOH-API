@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from typing import List
+from typing import List, Optional
 
 from database import get_db
 from helpers import assist
-from helpers.auth import require_system_admin, CurrentUser
+from helpers.auth import require_system_admin, require_user, CurrentUser
 from models.user_model import (
+    ParamFacilityUser,
     ParamUserEdit,
     User,
     UserDB,
@@ -16,6 +17,7 @@ from models.user_model import (
     UserWithDetail,
 )
 from models.district_model import DistrictDB
+from models.facility_model import FacilityDB
 from models.laboratory_model import LaboratoryDB
 from models.province_model import ProvinceDB
 from models.role_model import RoleDB
@@ -101,6 +103,147 @@ async def create_user(
         raise HTTPException(status_code=400, detail=f"Unable to create user: {e}")
 
     return await _load_detail(db, db_user.id)
+
+
+@router.post("/create-facility", response_model=UserWithDetail)
+async def create_facility_user(
+    param: ParamFacilityUser,
+    db: AsyncSession = Depends(get_db),
+    caller: CurrentUser = Depends(require_user),
+):
+    """Opens an account for facility staff.
+
+    A facility Super User may do this for their own facility only; an
+    Administrator may do it for any facility. The role is restricted to the
+    facility roles, and the account's facility/laboratory/location is set from
+    the creator (Super User) or the chosen facility (admin) - never from the
+    form - so staff always land on the right laboratory's work.
+    """
+    is_admin = assist.is_system_admin(caller.role_id)
+    is_super = caller.role_id == assist.ROLE_FACILITY_SUPER_USER
+    if not (is_admin or is_super):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an administrator or a facility super user may open facility accounts",
+        )
+
+    if param.role_id not in assist.LABORATORY_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail="A facility account must be a Facility Super User or Facility Staff",
+        )
+
+    if await _find_by_email(db, param.email):
+        raise HTTPException(
+            status_code=400,
+            detail=f"An account already exists for '{param.email}'",
+        )
+
+    # resolve which facility (and laboratory/location) the account belongs to
+    if is_super:
+        creator = (
+            await db.execute(select(UserDB).where(UserDB.id == caller.id))
+        ).scalar_one_or_none()
+        if not creator or not creator.facility_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Your account is not linked to a facility, so you cannot open facility accounts",
+            )
+        facility_id = creator.facility_id
+        facility_name = creator.facility_name
+        laboratory_id = creator.laboratory_id
+        province_id = creator.province_id
+        district_id = creator.district_id
+    else:
+        if not param.facility_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Please choose the facility this account belongs to",
+            )
+        facility = (
+            await db.execute(
+                select(FacilityDB).where(FacilityDB.id == param.facility_id)
+            )
+        ).scalar_one_or_none()
+        if not facility:
+            raise HTTPException(
+                status_code=400, detail="The selected facility was not found"
+            )
+        facility_id = facility.id
+        facility_name = facility.name
+        laboratory_id = param.laboratory_id
+        province_id = facility.province_id
+        district_id = facility.district_id
+
+    db_user = UserDB(
+        type=assist.USER_MEMBER,
+        fname=param.fname.strip(),
+        lname=param.lname.strip(),
+        position=(param.position or "").strip() or None,
+        email=param.email.lower().strip(),
+        mobile_code=(param.mobile_code or "+260").strip(),
+        mobile=param.mobile.strip(),
+        role_id=param.role_id,
+        password=assist.hash_password(param.password),
+        # opened on someone's behalf: active at once, no verification step
+        status_id=assist.STATUS_APPROVED,
+        stage_id=assist.APPROVAL_STAGE_APPROVED,
+        approval_levels=1,
+        email_verified=True,
+        laboratory_id=laboratory_id,
+        facility_id=facility_id,
+        facility_name=facility_name,
+        province_id=province_id,
+        district_id=district_id,
+        created_by=caller.email,
+    )
+    db.add(db_user)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Unable to create the account: {e}")
+
+    return await _load_detail(db, db_user.id)
+
+
+@router.get("/facility-list", response_model=List[UserWithDetail])
+async def list_facility_users(
+    facility_id: Optional[int] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    caller: CurrentUser = Depends(require_user),
+):
+    """The accounts belonging to a facility.
+
+    A Super User sees their own facility's accounts (the query param is
+    ignored); an Administrator sees the accounts of the facility they ask for.
+    """
+    is_admin = assist.is_system_admin(caller.role_id)
+    is_super = caller.role_id == assist.ROLE_FACILITY_SUPER_USER
+    if not (is_admin or is_super):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an administrator or a facility super user may view facility accounts",
+        )
+
+    if is_super:
+        creator = (
+            await db.execute(select(UserDB).where(UserDB.id == caller.id))
+        ).scalar_one_or_none()
+        target = creator.facility_id if creator else None
+    else:
+        target = facility_id
+
+    if not target:
+        return []
+
+    result = await db.execute(
+        select(UserDB)
+        .options(selectinload(UserDB.role), selectinload(UserDB.laboratory))
+        .where(UserDB.facility_id == target)
+        .order_by(UserDB.fname, UserDB.lname)
+    )
+    return result.scalars().all()
 
 
 @router.put("/update/{id}", response_model=UserWithDetail)

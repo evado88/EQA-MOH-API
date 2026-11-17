@@ -440,6 +440,36 @@ class UserSave(BaseModel):
         orm_mode = True
 
 
+class ParamFacilityUser(BaseModel):
+    """Posted when a facility Super User (for their own facility) or an
+    Administrator (for any facility) opens an account for facility staff.
+
+    Unlike UserSave this is deliberately facility-only: the server sets the
+    facility/laboratory/location from the creator (or, for an admin, from the
+    chosen facility), so the form cannot point an account at the wrong place.
+    The password is set here and the account is active immediately - there is
+    no email-verification step for an account opened on someone's behalf.
+    """
+
+    fname: str = Field(..., min_length=2, max_length=50)
+    lname: str = Field(..., min_length=2, max_length=50)
+    position: Optional[str] = None
+    email: EmailStr
+    mobile_code: Optional[str] = None
+    mobile: str = Field(..., min_length=3, max_length=15)
+
+    # must be a facility role (Super User or Staff); enforced in the route
+    role_id: int = Field(..., ge=1, le=100)
+    password: str = Field(..., min_length=8, max_length=255)
+
+    # admin only: which facility the account belongs to (a Super User's own
+    # facility is used instead, whatever is sent here)
+    facility_id: Optional[int] = Field(default=None, ge=1)
+    laboratory_id: Optional[int] = Field(default=None, ge=1)
+
+    created_by: Optional[str] = None
+
+
 class ParamUserEdit(BaseModel):
     """The user being edited, and everything its form has to offer as a choice"""
 
