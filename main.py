@@ -30,6 +30,7 @@ from routes import bacteriologyresult_routes
 from routes import announcement_routes
 from routes import evaluation_routes
 from routes import target_routes
+from routes import breakpoint_routes
 from routes import report_routes
 from routes import enrollment_routes
 from routes import applications_routes
@@ -105,6 +106,7 @@ app.include_router(bacteriologyresult_routes.router)
 app.include_router(announcement_routes.router)
 app.include_router(evaluation_routes.router)
 app.include_router(target_routes.router)
+app.include_router(breakpoint_routes.router)
 app.include_router(report_routes.router)
 app.include_router(enrollment_routes.router)
 app.include_router(applications_routes.router)

@@ -10,12 +10,15 @@ over is a base-URL change in the client and nothing else.
 """
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import text
+from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from helpers import assist
+from helpers.clsi import clsi_group_for, zone_range_for
 from helpers.pdfstub import MARGIN_LEFT, PdfDocument
 from models.bacteriologyresult_model import ast_interpretations
+from models.clsi_breakpoint_model import CLSIBreakpointDB
 from models.method_model import RESULT_FORM_BACTERIOLOGY
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -99,7 +102,48 @@ async def _load_ast_rows(db, enrollment_id):
     return result.mappings().all()
 
 
-def _render_bacteriology(doc, header, rows, ast_rows):
+def _ast_sample_organism(rows):
+    """The expected organism of the AST sample, from the evaluation rows.
+
+    The AST section runs on one sample; its expected zone-diameter ranges depend
+    on that sample's organism (its CLSI group), so find the organism target of
+    the sample the AST row belongs to.
+    """
+    ast_evals = [r for r in rows if r["attribute"] == AST_ATTRIBUTE]
+    ast_eval = next(
+        (r for r in ast_evals if r["assigned_text"] or r["evaluated"]),
+        ast_evals[0] if ast_evals else None,
+    )
+    if not ast_eval:
+        return None
+    org = next(
+        (
+            r for r in rows
+            if r["sample_name"] == ast_eval["sample_name"]
+            and r["attribute"] == "organism_identified"
+        ),
+        None,
+    )
+    return org["assigned_text"] if org else None
+
+
+async def _load_ast_breakpoints(db, rows):
+    """The CLSI breakpoints for the AST sample's organism, keyed by antibiotic.
+
+    Empty when the organism has no group in the breakpoint table - the report
+    then shows no expected range rather than a guessed one.
+    """
+    organism = _ast_sample_organism(rows)
+    group = clsi_group_for(organism)
+    if not group:
+        return {}
+    result = await db.execute(
+        select(CLSIBreakpointDB).where(CLSIBreakpointDB.organism_group == group)
+    )
+    return {bp.antibiotic.upper(): bp for bp in result.scalars().all()}
+
+
+def _render_bacteriology(doc, header, rows, ast_rows, breakpoints=None):
     """The TF-NHRTI-BACT-008 feedback report, from the frozen evaluation.
 
     Lays out the scheme's own report: the sample-set-design note, a block per
@@ -108,6 +152,7 @@ def _render_bacteriology(doc, header, rows, ast_rows):
     score, and the per-sample performance comments.
     """
     cycle = header["cycle_code"] or header["cycle_name"] or ""
+    breakpoints = breakpoints or {}
 
     doc.text(header["provider_name"] or "Proficiency Testing Scheme",
              size=15, bold=True)
@@ -215,11 +260,11 @@ def _render_bacteriology(doc, header, rows, ast_rows):
         doc.heading("Antimicrobial Susceptibility Testing (AST)")
         ast_cols = [
             (MARGIN_LEFT, "#"),
-            (MARGIN_LEFT + 20, "Antibiotic"),
-            (MARGIN_LEFT + 170, "Zone (mm)"),
-            (MARGIN_LEFT + 230, "Interp."),
-            (MARGIN_LEFT + 285, "Expected"),
-            (MARGIN_LEFT + 350, "Conclusion"),
+            (MARGIN_LEFT + 18, "Antibiotic"),
+            (MARGIN_LEFT + 160, "Zone (mm)"),
+            (MARGIN_LEFT + 215, "Interp."),
+            (MARGIN_LEFT + 262, "Expected range (mm)"),
+            (MARGIN_LEFT + 372, "Conclusion"),
         ]
         doc.columns(ast_cols, size=8, bold=True)
         for i, ar in enumerate(ast_rows, start=1):
@@ -227,11 +272,18 @@ def _render_bacteriology(doc, header, rows, ast_rows):
             mine = (ar["interpretation"] or "").upper()
             expected = target.get(agent)
             if not expected:
-                conclusion, exp_show = "NE", "NE"
+                conclusion = "NE"
             elif mine == expected:
-                conclusion, exp_show = "Acceptable", expected
+                conclusion = "Acceptable"
             else:
-                conclusion, exp_show = "Unacceptable", expected
+                conclusion = "Unacceptable"
+            # the expected zone-diameter range for the expected interpretation,
+            # from the CLSI breakpoints; the interpretation letter is a fallback
+            # where no breakpoint is on file, and 'NE' where there is no target
+            if not expected:
+                exp_show = "NE"
+            else:
+                exp_show = zone_range_for(breakpoints.get(agent), expected) or expected
             zone = ar["zone_diameter"]
             doc.columns(
                 [
@@ -338,7 +390,8 @@ async def pt_performance_report(
     # the generic individual-evaluation layout
     if header["result_form"] == RESULT_FORM_BACTERIOLOGY:
         ast_rows = await _load_ast_rows(db, enrollment_id)
-        _render_bacteriology(doc, header, rows, ast_rows)
+        breakpoints = await _load_ast_breakpoints(db, rows)
+        _render_bacteriology(doc, header, rows, ast_rows, breakpoints)
         pdf = doc.render()
         name = f"PT-Report-{header['report_number']}.pdf".replace("/", "-")
         disposition = "attachment" if download else "inline"
