@@ -226,7 +226,14 @@ class HIVEIDResult(BaseModel):
     user_id: int
 
     # stage
-    stage_id: int = Field(..., ge=1, le=8, description="Stage must be between 1 and 8")
+    # leftover from the old approval workflow; results no longer need approval,
+    # so the stage is optional and defaults to "submitted" when not supplied
+    stage_id: int = Field(
+        default=assist.APPROVAL_STAGE_SUBMITTED,
+        ge=1,
+        le=8,
+        description="Stage must be between 1 and 8",
+    )
 
     # status
     status_id: int = Field(
