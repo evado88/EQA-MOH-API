@@ -607,23 +607,25 @@ async def extend_ptcycle_date(
             detail=f"The new date must be later than the current one ({old:%d %b %Y})",
         )
 
-    # keep the schedule in order
-    if param.field == "closing_date":
-        if ptcycle.effective_date and new < ptcycle.effective_date:
-            raise HTTPException(status_code=400, detail="Closing cannot be before enrollment opens")
-        if ptcycle.shipping_date and new > ptcycle.shipping_date:
-            raise HTTPException(
-                status_code=400,
-                detail="Closing cannot be after the sample shipping date - adjust shipping first",
-            )
-    else:  # result_submission_due_date
-        if ptcycle.test_event_stop_date and new < ptcycle.test_event_stop_date:
-            raise HTTPException(status_code=400, detail="The due date cannot be before the test event ends")
-        if ptcycle.reports_availability_date and new > ptcycle.reports_availability_date:
-            raise HTTPException(
-                status_code=400,
-                detail="The due date cannot be after the report availability date - adjust that first",
-            )
+    # keep the schedule in order (relaxed in dev-tools mode so dates can be
+    # positioned freely for testing)
+    if not DEV_TOOLS_ENABLED:
+        if param.field == "closing_date":
+            if ptcycle.effective_date and new < ptcycle.effective_date:
+                raise HTTPException(status_code=400, detail="Closing cannot be before enrollment opens")
+            if ptcycle.shipping_date and new > ptcycle.shipping_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Closing cannot be after the sample shipping date - adjust shipping first",
+                )
+        else:  # result_submission_due_date
+            if ptcycle.test_event_stop_date and new < ptcycle.test_event_stop_date:
+                raise HTTPException(status_code=400, detail="The due date cannot be before the test event ends")
+            if ptcycle.reports_availability_date and new > ptcycle.reports_availability_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The due date cannot be after the report availability date - adjust that first",
+                )
 
     setattr(ptcycle, param.field, new)
     ptcycle.updated_by = user.email
