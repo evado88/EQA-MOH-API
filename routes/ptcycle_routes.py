@@ -599,7 +599,9 @@ async def extend_ptcycle_date(
 
     old = getattr(ptcycle, param.field)
     new = param.new_date
-    if old and new <= old:
+    # In dev-tools mode allow back-dating so reminders/date-derived behaviour can
+    # be tested; in production the new date must move the window forward.
+    if old and new <= old and not DEV_TOOLS_ENABLED:
         raise HTTPException(
             status_code=400,
             detail=f"The new date must be later than the current one ({old:%d %b %Y})",
